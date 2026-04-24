@@ -1,0 +1,7 @@
+[project]
+name = "opencanvas"
+version = "0.1.0"
+description = "CANVAS reproduction"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
