@@ -1,0 +1,36 @@
+{
+  "title": "Ada and the Warehouse Journal",
+  "shots": [
+    "Ada, a 30-year-old engineer in a gray raincoat, pushes open the heavy metal door of an abandoned warehouse at dusk. Wide shot, low light.",
+    "Interior: Ada walks between towering industrial shelves. Dust motes drift in shafts of amber evening light. Medium shot from behind.",
+    "Close-up of Ada's hand lifting a weathered leather journal from a steel crate labeled 1987.",
+    "Ada sits on the warehouse floor, raincoat now dry and dust-streaked, flipping through the journal. Medium close-up.",
+    "Exterior again: Ada, journal tucked under her arm, steps back into the rain outside the warehouse. Same wide framing as shot 1 but darker."
+  ],
+  "characters": [
+    {
+      "id": "char-ada",
+      "name": "Ada",
+      "description": "30-year-old engineer, short dark hair, gray raincoat."
+    }
+  ],
+  "locations": [
+    {
+      "id": "loc-warehouse-ext",
+      "name": "Warehouse exterior",
+      "description": "Abandoned industrial warehouse, heavy metal door, concrete exterior."
+    },
+    {
+      "id": "loc-warehouse-int",
+      "name": "Warehouse interior",
+      "description": "Cavernous interior with tall steel shelves and amber light."
+    }
+  ],
+  "props": [
+    {
+      "id": "prop-journal",
+      "name": "Leather journal",
+      "description": "Weathered 1987-era leather-bound journal."
+    }
+  ]
+}
