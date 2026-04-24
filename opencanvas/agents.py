@@ -22,21 +22,27 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from .config import Settings
 from .memory import Memory
 from .prompts import (
+    BACKGROUND_PLANNING,
+    BG_VISIBILITY,
     CANDIDATE_GENERATION,
+    CHAR_VISIBILITY,
     CHARACTER_PLANNING,
     CONTINUATION_DECISION,
     JUDGE_SCORING,
     LOCATION_CLUSTERING,
     PROP_PLANNING,
+    PROP_VISIBILITY,
 )
 from .schemas import (
     AnchorSet,
+    BackgroundPlan,
     CandidateScore,
     Character,
     CharacterState,
     CharacterTimeline,
     ContinuationDecision,
     ContinuationMode,
+    FrameVisibility,
     Location,
     LocationClustering,
     Plan,
@@ -164,14 +170,36 @@ async def _decide_continuation(
     return decision.continuation_mode
 
 
+async def _plan_background(
+    shot_index: int,
+    shot_description: str,
+    shot_metadata: dict,
+    prop_history: list[dict],
+    settings: Settings,
+) -> BackgroundPlan:
+    user = (
+        BACKGROUND_PLANNING.format(
+            shot_description=shot_description,
+            shot_metadata=shot_metadata,
+            prop_history=prop_history or "(none)",
+        )
+        + f"\n\nReturn a BackgroundPlan for shot index {shot_index}."
+    )
+    bp = await _run_planner_async(BackgroundPlan, BACKGROUND_PLANNING, user, settings)
+    bp.shot_index = shot_index
+    return bp
+
+
 # --- Main planner ------------------------------------------------------------
 
 
 async def plan_async(story: Story, settings: Settings) -> Plan:
-    """Global Planner Agent (§3.1) = Tables 20 + 22 + 23 + 24, gathered."""
+    """Global Planner Agent (§3.1) = Tables 20 + 22 + 23 + 24 + 21, gathered."""
     cluster = await _cluster_locations(story, settings)
 
-    char_task = asyncio.gather(*(_plan_character(c, story.shots, settings) for c in story.characters))
+    char_task = asyncio.gather(
+        *(_plan_character(c, story.shots, settings) for c in story.characters)
+    )
     prop_task = asyncio.gather(*(_plan_prop(p, story.shots, settings) for p in story.props))
     continuation_task = asyncio.gather(
         *(
@@ -212,6 +240,27 @@ async def plan_async(story: Story, settings: Settings) -> Plan:
         for i, desc in enumerate(story.shots)
     ]
 
+    background_plans = await asyncio.gather(
+        *(
+            _plan_background(
+                shot_index=s.index,
+                shot_description=s.description,
+                shot_metadata={
+                    "characters": s.character_states,
+                    "location": s.location_id,
+                    "props": s.prop_states,
+                },
+                prop_history=[
+                    {"shot": prev.index, "props": prev.prop_states}
+                    for prev in shots[: s.index]
+                    if prev.prop_states
+                ],
+                settings=settings,
+            )
+            for s in shots
+        )
+    )
+
     known = {l.id for l in story.locations}
     extra_locs = [
         Location(id=lid, name=cluster.location_names.get(lid, lid), description="")
@@ -222,6 +271,7 @@ async def plan_async(story: Story, settings: Settings) -> Plan:
         characters=story.characters,
         locations=[*story.locations, *extra_locs],
         props=story.props,
+        background_plans=list(background_plans),
     )
 
 
@@ -250,9 +300,26 @@ def _collect_refs(states: dict[str, str], getter, skip: set[str]) -> list[str]:
     return refs
 
 
-def retrieve(shot: Shot, memory: Memory) -> AnchorSet:
+def _character_anchor(
+    memory: Memory, char_id: str, current_state: str, prev_state: str | None
+) -> Path | None:
+    """Algorithm 2 §4: appearance change → canonical first; else → recent first."""
+    canonical = memory.get_character_canonical(char_id, current_state)
+    recent = memory.characters.get((char_id, current_state))
+    if prev_state is None or prev_state != current_state:
+        return canonical or recent
+    return recent or canonical
+
+
+def retrieve(shot: Shot, plan: Plan, memory: Memory) -> AnchorSet:
+    prev_shot = plan.shots[shot.index - 1] if shot.index > 0 else None
+
+    def char_getter(cid: str, state: str) -> Path | None:
+        prev_state = prev_shot.character_states.get(cid) if prev_shot else None
+        return _character_anchor(memory, cid, state, prev_state)
+
     char_refs = _collect_refs(
-        shot.character_states, memory.get_character, {CharacterState.not_present}
+        shot.character_states, char_getter, {CharacterState.not_present}
     )
     prop_refs = _collect_refs(
         shot.prop_states,
@@ -301,9 +368,25 @@ def _anchor_labels(anchors: AnchorSet) -> list[str]:
     )
 
 
+def _format_background_plan(bp: BackgroundPlan | None) -> str:
+    if bp is None:
+        return "(no background plan)"
+    parts = []
+    if bp.must_appear:
+        parts.append(f"must_appear={bp.must_appear}")
+    if bp.must_not_appear:
+        parts.append(f"must_not_appear={bp.must_not_appear}")
+    if bp.background_props:
+        parts.append(f"persistent_bg_props={bp.background_props}")
+    if bp.carried_props:
+        parts.append(f"carried_props={bp.carried_props}")
+    return "; ".join(parts) or "(no constraints)"
+
+
 def generate(
     shot: Shot,
     anchors: AnchorSet,
+    background_plan: BackgroundPlan | None,
     settings: Settings,
     pipeline: ImagePipeline,
     seed: int,
@@ -318,7 +401,7 @@ def generate(
         character_states=_format_states(shot.character_states),
         prop_states=_format_states(shot.prop_states),
         location=shot.location_id or "(unknown)",
-    )
+    ) + f"\n\nBackground constraints: {_format_background_plan(background_plan)}"
     out_dir = settings.out_dir / "candidates" / f"shot_{shot.index:04d}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -394,3 +477,88 @@ def select(
 ) -> tuple[Path, list[CandidateScore]]:
     """Synchronous wrapper for `select_async`."""
     return asyncio.run(select_async(candidates, shot, memory, settings))
+
+
+# --- Algorithm 4 — VLM visibility gating (Tables 27, 28, 29) ----------------
+
+from .schemas import CharacterVisibility, PropVisibility
+
+
+class _CharVisibilityResp(BaseModel):
+    characters: list[CharacterVisibility]
+
+
+class _PropVisibilityResp(BaseModel):
+    props: list[PropVisibility]
+
+
+class _LocVisibilityResp(BaseModel):
+    visible: bool
+
+
+async def _vlm_check(
+    response_type: type[T], instructions: str, frame: Path, settings: Settings
+) -> T:
+    agent = _agent_for(response_type, instructions, settings)
+    res = await agent.run(["Inspect the frame.", BinaryContent.from_path(frame)])
+    return res.output
+
+
+async def _check_characters_visible(
+    shot: Shot, frame: Path, settings: Settings
+) -> list[CharacterVisibility]:
+    expected = {
+        cid: state
+        for cid, state in shot.character_states.items()
+        if state != CharacterState.not_present
+    }
+    if not expected:
+        return []
+    instructions = CHAR_VISIBILITY.format(
+        shot_description=shot.description, expected_characters=expected
+    )
+    return (await _vlm_check(_CharVisibilityResp, instructions, frame, settings)).characters
+
+
+async def _check_props_visible(
+    shot: Shot, frame: Path, settings: Settings
+) -> list[PropVisibility]:
+    expected = {
+        pid: state
+        for pid, state in shot.prop_states.items()
+        if state not in {PropState.not_visible, PropState.not_present}
+    }
+    if not expected:
+        return []
+    instructions = PROP_VISIBILITY.format(
+        shot_description=shot.description, expected_props=expected
+    )
+    return (await _vlm_check(_PropVisibilityResp, instructions, frame, settings)).props
+
+
+async def _check_location_visible(shot: Shot, frame: Path, settings: Settings) -> bool:
+    if not shot.location_id:
+        return False
+    instructions = BG_VISIBILITY.format(
+        shot_description=shot.description, location=shot.location_id
+    )
+    return (await _vlm_check(_LocVisibilityResp, instructions, frame, settings)).visible
+
+
+async def extract_visibility_async(
+    shot: Shot, chosen: Path, settings: Settings
+) -> FrameVisibility:
+    chars, location_ok, props = await asyncio.gather(
+        _check_characters_visible(shot, chosen, settings),
+        _check_location_visible(shot, chosen, settings),
+        _check_props_visible(shot, chosen, settings),
+    )
+    return FrameVisibility(
+        characters=chars, location_visible=location_ok, props=props
+    )
+
+
+def extract_visibility(
+    shot: Shot, chosen: Path, settings: Settings
+) -> FrameVisibility:
+    return asyncio.run(extract_visibility_async(shot, chosen, settings))

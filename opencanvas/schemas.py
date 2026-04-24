@@ -80,11 +80,47 @@ class ContinuationDecision(BaseModel):
     reasoning: str = ""
 
 
+class BackgroundPlan(BaseModel):
+    """Output of Table 21 — per-shot background reasoning."""
+
+    shot_index: int = 0
+    background_props: list[str] = Field(
+        default_factory=list,
+        description="prop_ids that should remain visible in the background.",
+    )
+    must_appear: list[str] = Field(default_factory=list)
+    must_not_appear: list[str] = Field(default_factory=list)
+    carried_props: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="character_id -> prop_ids carried (must not remain in scene).",
+    )
+    reasoning: str = ""
+
+
+class CharacterVisibility(BaseModel):
+    character_id: str
+    visible: bool
+
+
+class PropVisibility(BaseModel):
+    prop_id: str
+    visible: bool
+
+
+class FrameVisibility(BaseModel):
+    """Output of Algorithm 4 — gates which entities are eligible for memory update."""
+
+    characters: list[CharacterVisibility] = Field(default_factory=list)
+    location_visible: bool = True
+    props: list[PropVisibility] = Field(default_factory=list)
+
+
 class Plan(BaseModel):
     shots: list[Shot]
     characters: list[Character]
     locations: list[Location]
     props: list[Prop] = Field(default_factory=list)
+    background_plans: list[BackgroundPlan] = Field(default_factory=list)
 
 
 class AnchorSet(BaseModel):

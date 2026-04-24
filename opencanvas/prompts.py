@@ -2,15 +2,16 @@
 
 Tables mapped to function roles:
 
-- Table 20: Location Clustering            -> LOCATION_CLUSTERING
-- Table 22: Character Appearance Planning  -> CHARACTER_PLANNING
-- Table 23: Prop State Planning            -> PROP_PLANNING
-- Table 24: Continuation Decision          -> CONTINUATION_DECISION
-- Table 25: Candidate Frame Generation     -> CANDIDATE_GENERATION
-- Table 26: VLM Continuity Scoring         -> JUDGE_SCORING
-- Table 27: Character Anchor Extraction    -> CHAR_ANCHOR_EXTRACT
-- Table 28: Background Anchor Extraction   -> BG_ANCHOR_EXTRACT
-- Table 29: Prop Anchor Extraction         -> PROP_ANCHOR_EXTRACT
+- Table 20: Location Clustering              -> LOCATION_CLUSTERING
+- Table 21: Background / Prop-Geometry Plan  -> BACKGROUND_PLANNING
+- Table 22: Character Appearance Planning    -> CHARACTER_PLANNING
+- Table 23: Prop State Planning              -> PROP_PLANNING
+- Table 24: Continuation Decision            -> CONTINUATION_DECISION
+- Table 25: Candidate Frame Generation       -> CANDIDATE_GENERATION
+- Table 26: VLM Continuity Scoring           -> JUDGE_SCORING
+- Table 27: Character Anchor Visibility      -> CHAR_VISIBILITY
+- Table 28: Background Anchor Visibility     -> BG_VISIBILITY
+- Table 29: Prop Anchor Visibility           -> PROP_VISIBILITY
 """
 
 LOCATION_CLUSTERING = """\
@@ -209,59 +210,80 @@ Scoring Guidelines
 """
 
 
-CHAR_ANCHOR_EXTRACT = """\
-You are extracting visual anchors for characters from a storyboard frame.
+BACKGROUND_PLANNING = """\
+You are a story continuity planner responsible for maintaining consistent \
+environments across storyboard shots. Your task is to reason about how the \
+background scene should evolve based on the current and future states of \
+important props and architectural geometry of the background location.
 
 Input
-- Frame image
-- Shot description: {shot_description}
-- Character appearance states: {character_states}
+- Current shot description: {shot_description}
+- Current shot metadata (characters, location, prop states): {shot_metadata}
+- Previously known prop world state: {prop_history}
 
-Task
-Identify characters visible in the frame. For each clearly visible character, \
-produce a description that captures their current appearance (face, clothing, \
-hairstyle, and overall identity) together with the appearance_state label from \
-the plan.
+Plan the background scene so that it remains logically consistent with both \
+the current story state and upcoming events.
 
-Guidelines
-- Extract anchors only for characters clearly visible.
-- Anchors should capture the full appearance identity.\
+Reason about:
+1. Which props should remain visible in the background environment.
+2. Which props should disappear because they were taken, destroyed, or moved.
+3. Which props are likely to appear in the background due to upcoming story events.
+4. Which props are currently carried by characters and therefore should not \
+remain in the environment.
+5. Which environmental objects must persist across shots to maintain scene \
+identity (e.g., furniture, structures, display cases).
+6. Whether the camera framing hides some props even though they still exist in \
+the environment.
+
+Constraints
+- Background elements should remain consistent with previously established \
+environments.
+- If a prop was present earlier in the same location and nothing removed it, it \
+should persist.
+- Props carried by characters must not remain in the background.
+- The planned background should support future story events.\
 """
 
 
-BG_ANCHOR_EXTRACT = """\
-You are extracting the visual environment anchor for a location from a \
-storyboard frame.
+CHAR_VISIBILITY = """\
+You are inspecting a generated storyboard frame to decide whether each \
+expected character is clearly visible.
 
 Input
 - Frame image
 - Shot description: {shot_description}
-- Location identity: {location}
+- Expected characters and their appearance states: {expected_characters}
 
-Task
-Identify the environment and describe the spatial layout of the scene in a way \
-that another generator could reproduce it (walls, furniture, display cases, \
-room layout).
-
-Guidelines
-- The anchor should capture the environment layout.
-- Avoid including large foreground characters when possible.\
+For each expected character, return a boolean `visible` indicating whether the \
+character is clearly identifiable in the frame (face, clothing, body cues all \
+recognisable). Skip characters that are occluded, partially visible, or absent.\
 """
 
 
-PROP_ANCHOR_EXTRACT = """\
-You are extracting visual anchors for important objects from a storyboard frame.
+BG_VISIBILITY = """\
+You are inspecting a generated storyboard frame to decide whether the planned \
+location is clearly visible enough to serve as a background anchor.
 
 Input
 - Frame image
 - Shot description: {shot_description}
-- Object state descriptions: {prop_states}
+- Planned location: {location}
 
-Task
-Identify objects that appear in the frame and describe visual anchors \
-representing their current state.
+Return `visible=true` only if the spatial layout of the location (walls, \
+furniture, display cases, room geometry) is sufficiently exposed that another \
+generator could reproduce it from this frame.\
+"""
 
-Guidelines
-- Extract anchors only for visible objects.
-- Ensure the object state matches the visual evidence.\
+
+PROP_VISIBILITY = """\
+You are inspecting a generated storyboard frame to decide whether each expected \
+prop is clearly visible.
+
+Input
+- Frame image
+- Shot description: {shot_description}
+- Expected props and states: {expected_props}
+
+For each expected prop, return a boolean `visible` indicating whether the \
+prop is clearly identifiable in the frame in the planned state.\
 """

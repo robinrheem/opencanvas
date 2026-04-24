@@ -10,13 +10,22 @@ from typing import Callable
 from diskcache import Cache
 from pydantic import TypeAdapter
 
-from .agents import ImagePipeline, generate, plan_async, retrieve, select_async
+from .agents import (
+    ImagePipeline,
+    extract_visibility_async,
+    generate,
+    plan_async,
+    retrieve,
+    select_async,
+)
 from .config import CACHE_TAG_GENERATE, Settings
 from .memory import Memory
 from .schemas import (
     AnchorSet,
+    BackgroundPlan,
     CandidateScore,
     CharacterState,
+    FrameVisibility,
     Plan,
     PropState,
     Shot,
@@ -60,6 +69,7 @@ def _cached_generate(
     cache: Cache,
     shot: Shot,
     anchors: AnchorSet,
+    background_plan: BackgroundPlan | None,
     settings: Settings,
     pipeline: ImagePipeline,
     seed: int,
@@ -68,7 +78,7 @@ def _cached_generate(
     hit = cache.get(key)
     if hit and all(Path(p).exists() for p in hit):
         return [Path(p) for p in hit]
-    paths = generate(shot, anchors, settings, pipeline, seed=seed)
+    paths = generate(shot, anchors, background_plan, settings, pipeline, seed=seed)
     cache.set(key, [str(p) for p in paths], tag=CACHE_TAG_GENERATE)
     return paths
 
@@ -99,15 +109,21 @@ async def run_async(
     p = await plan_async(story, settings)
     (settings.out_dir / "plan.json").write_text(p.model_dump_json(indent=2))
 
+    bg_by_shot = {bp.shot_index: bp for bp in p.background_plans}
+
     results: list[ShotResult] = []
     with Cache(str(settings.cache_dir), tag_index=True) as cache:
         for shot in p.shots:
-            anchors = retrieve(shot, memory)
-            candidates = _cached_generate(cache, shot, anchors, settings, pipe, seed=seed_of(shot))
+            anchors = retrieve(shot, p, memory)
+            candidates = _cached_generate(
+                cache, shot, anchors, bg_by_shot.get(shot.index),
+                settings, pipe, seed=seed_of(shot),
+            )
             chosen, scores = await select_async(candidates, shot, memory, settings)
 
             memory.set_frame(shot.index, chosen)
-            _update_anchors_from_frame(shot, chosen, memory)
+            visibility = await extract_visibility_async(shot, chosen, settings)
+            _update_anchors_from_frame(shot, chosen, memory, visibility)
             memory.save()
 
             results.append(
@@ -131,20 +147,30 @@ def run(
     return asyncio.run(run_async(story, settings, image_pipeline, seed_maker))
 
 
-def _update_anchors_from_frame(shot: Shot, chosen: Path, memory: Memory) -> None:
-    """Algorithm 4 (simplified): reuse the selected frame as the anchor.
+def _update_anchors_from_frame(
+    shot: Shot, chosen: Path, memory: Memory, visibility: FrameVisibility
+) -> None:
+    """Algorithm 4 — VLM gates which entities get their memory anchor refreshed.
 
-    Paper's Algorithm 4 calls a VLM with Tables 27-29 to extract clean crops.
+    Paper crops anchors from the chosen frame; we reuse the full frame but
+    skip updates for entities the VLM did not see, so memory does not drift
+    when characters/props are occluded or absent.
     """
+    visible_chars = {cv.character_id for cv in visibility.characters if cv.visible}
     for cid, state in shot.character_states.items():
         if state == CharacterState.not_present:
             continue
+        if visibility.characters and cid not in visible_chars:
+            continue
         memory.set_character(cid, state, chosen)
 
-    if shot.location_id:
+    if shot.location_id and visibility.location_visible:
         memory.set_location(shot.location_id, chosen)
 
+    visible_props = {pv.prop_id for pv in visibility.props if pv.visible}
     for pid, state in shot.prop_states.items():
         if state in {PropState.not_visible, PropState.not_present}:
+            continue
+        if visibility.props and pid not in visible_props:
             continue
         memory.set_prop(pid, state, chosen)
