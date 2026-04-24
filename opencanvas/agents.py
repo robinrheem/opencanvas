@@ -219,6 +219,7 @@ async def plan_async(story: Story, settings: Settings) -> Plan:
 
     char_timelines = {tl.character_id: tl.appearance_by_shot for tl in char_results}
     prop_timelines = {tl.prop_id: tl.state_by_shot for tl in prop_results}
+    prop_carriers = {tl.prop_id: tl.carrier_by_shot for tl in prop_results}
 
     continuations: list[ContinuationMode] = [ContinuationMode.fresh_location]
     seen_locations: set[str] = {cluster.shot_location[0]}
@@ -236,6 +237,11 @@ async def plan_async(story: Story, settings: Settings) -> Plan:
             continuation_mode=continuations[i],
             character_states={cid: tl[i] for cid, tl in char_timelines.items()},
             prop_states={pid: tl[i] for pid, tl in prop_timelines.items()},
+            prop_carriers={
+                pid: carriers[i]
+                for pid, carriers in prop_carriers.items()
+                if carriers[i]
+            },
         )
         for i, desc in enumerate(story.shots)
     ]
@@ -323,7 +329,11 @@ def retrieve(shot: Shot, plan: Plan, memory: Memory) -> AnchorSet:
     )
     prop_refs = _collect_refs(
         shot.prop_states,
-        lambda pid, state: memory.get_prop(pid, state) or memory.get_prop(pid, PropState.default),
+        lambda pid, state: (
+            memory.get_prop(pid, state)
+            or memory.get_prop(pid, PropState.default)
+            or memory.get_prop_any_state(pid)  # paper §3.2 Alg.2 step 6 — any prior state
+        ),
         {PropState.not_visible, PropState.not_present},
     )
     anchors = AnchorSet(character_refs=char_refs, prop_refs=prop_refs)
@@ -345,6 +355,36 @@ def _format_states(states: dict[str, str]) -> str:
     if not states:
         return "(none)"
     return ", ".join(f"{k}={v}" for k, v in states.items())
+
+
+def _format_prop_states_with_carriers(
+    states: dict[str, str], carriers: dict[str, str]
+) -> str:
+    if not states:
+        return "(none)"
+    parts = []
+    for pid, state in states.items():
+        carrier = carriers.get(pid)
+        parts.append(f"{pid}={state}" + (f" (carried by {carrier})" if carrier else ""))
+    return ", ".join(parts)
+
+
+def crop_to_anchor(frame_path: Path, bbox, dest: Path) -> Path:
+    """Crop a normalized BBox out of a frame and save to dest."""
+    from PIL import Image
+
+    with Image.open(frame_path) as im:
+        w, h = im.size
+        left = max(0, int(bbox.x * w))
+        top = max(0, int(bbox.y * h))
+        right = min(w, int((bbox.x + bbox.w) * w))
+        bottom = min(h, int((bbox.y + bbox.h) * h))
+        if right <= left or bottom <= top:
+            # Degenerate bbox; fall back to full frame.
+            im.convert("RGB").save(dest)
+        else:
+            im.crop((left, top, right, bottom)).convert("RGB").save(dest)
+    return dest
 
 
 def _load_refs(paths: list[str]):
@@ -399,7 +439,7 @@ def generate(
         shot_description=shot.description,
         anchor_summary=", ".join(_anchor_labels(anchors)) or "(none)",
         character_states=_format_states(shot.character_states),
-        prop_states=_format_states(shot.prop_states),
+        prop_states=_format_prop_states_with_carriers(shot.prop_states, shot.prop_carriers),
         location=shot.location_id or "(unknown)",
     ) + f"\n\nBackground constraints: {_format_background_plan(background_plan)}"
     out_dir = settings.out_dir / "candidates" / f"shot_{shot.index:04d}"

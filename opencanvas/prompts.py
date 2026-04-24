@@ -246,44 +246,59 @@ should persist.
 
 
 CHAR_VISIBILITY = """\
-You are inspecting a generated storyboard frame to decide whether each \
-expected character is clearly visible.
+You are extracting visual anchors for characters from a storyboard frame.
 
 Input
 - Frame image
 - Shot description: {shot_description}
 - Expected characters and their appearance states: {expected_characters}
 
-For each expected character, return a boolean `visible` indicating whether the \
-character is clearly identifiable in the frame (face, clothing, body cues all \
-recognisable). Skip characters that are occluded, partially visible, or absent.\
+Task
+For each expected character, decide whether the character is clearly visible \
+in the frame (face, clothing, body cues all recognisable). For each visible \
+character, also return a normalized bounding box (x, y, w, h, all in [0,1] of \
+the frame width/height) tightly enclosing the character's full appearance \
+identity.
+
+Guidelines
+- Extract anchors only for characters clearly visible.
+- The bbox should capture the full appearance identity (head + body if both \
+visible).
+- Skip characters that are occluded, partially visible, or absent.\
 """
 
 
 BG_VISIBILITY = """\
-You are inspecting a generated storyboard frame to decide whether the planned \
-location is clearly visible enough to serve as a background anchor.
+You are extracting the visual environment anchor for a location from a \
+storyboard frame.
 
 Input
 - Frame image
 - Shot description: {shot_description}
-- Planned location: {location}
+- Location identity: {location}
 
-Return `visible=true` only if the spatial layout of the location (walls, \
-furniture, display cases, room geometry) is sufficiently exposed that another \
-generator could reproduce it from this frame.\
+Task
+Decide whether the spatial layout of the location (walls, furniture, display \
+cases, room geometry) is sufficiently exposed in the frame that another \
+generator could reproduce it. Return `visible=true` only when the environment \
+is clearly readable, regardless of any foreground characters.\
 """
 
 
 PROP_VISIBILITY = """\
-You are inspecting a generated storyboard frame to decide whether each expected \
-prop is clearly visible.
+You are extracting visual anchors for important objects from a storyboard frame.
 
 Input
 - Frame image
 - Shot description: {shot_description}
 - Expected props and states: {expected_props}
 
-For each expected prop, return a boolean `visible` indicating whether the \
-prop is clearly identifiable in the frame in the planned state.\
+Task
+For each expected prop, decide whether the prop is clearly identifiable in \
+the frame in the planned state. For each visible prop, return a normalized \
+bounding box (x, y, w, h, all in [0,1]) tightly enclosing the prop.
+
+Guidelines
+- Extract anchors only for visible objects.
+- Ensure the object state matches the visual evidence.\
 """

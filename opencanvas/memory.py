@@ -111,5 +111,15 @@ class Memory:
     def get_prop(self, prop_id: str, state: str) -> Path | None:
         return self.props.get((prop_id, state))
 
+    def get_prop_any_state(self, prop_id: str) -> Path | None:
+        """Algorithm 2 step 6: 'if prop has appeared previously in the story'.
+
+        Returns the most recently set anchor for any state of the prop.
+        """
+        for (pid, _state), p in reversed(self.props.items()):
+            if pid == prop_id:
+                return p
+        return None
+
     def get_frame(self, shot_index: int) -> Path | None:
         return self.frames.get(shot_index)

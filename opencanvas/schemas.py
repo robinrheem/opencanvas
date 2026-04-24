@@ -55,6 +55,10 @@ class Shot(BaseModel):
     continuation_mode: ContinuationMode = ContinuationMode.fresh_location
     character_states: dict[str, str] = Field(default_factory=dict)
     prop_states: dict[str, str] = Field(default_factory=dict)
+    prop_carriers: dict[str, str] = Field(
+        default_factory=dict,
+        description="prop_id -> character_id carrying it in this shot.",
+    )
 
 
 class LocationClustering(BaseModel):
@@ -97,14 +101,25 @@ class BackgroundPlan(BaseModel):
     reasoning: str = ""
 
 
+class BBox(BaseModel):
+    """Normalized bounding box in [0, 1] frame coordinates."""
+
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    w: float = Field(gt=0.0, le=1.0)
+    h: float = Field(gt=0.0, le=1.0)
+
+
 class CharacterVisibility(BaseModel):
     character_id: str
     visible: bool
+    bbox: BBox | None = None
 
 
 class PropVisibility(BaseModel):
     prop_id: str
     visible: bool
+    bbox: BBox | None = None
 
 
 class FrameVisibility(BaseModel):

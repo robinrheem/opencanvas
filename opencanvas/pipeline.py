@@ -12,6 +12,7 @@ from pydantic import TypeAdapter
 
 from .agents import (
     ImagePipeline,
+    crop_to_anchor,
     extract_visibility_async,
     generate,
     plan_async,
@@ -123,7 +124,10 @@ async def run_async(
 
             memory.set_frame(shot.index, chosen)
             visibility = await extract_visibility_async(shot, chosen, settings)
-            _update_anchors_from_frame(shot, chosen, memory, visibility)
+            _update_anchors_from_frame(
+                shot, chosen, memory, visibility,
+                crop_dir=settings.out_dir / "crops" / f"shot_{shot.index:04d}",
+            )
             memory.save()
 
             results.append(
@@ -148,29 +152,45 @@ def run(
 
 
 def _update_anchors_from_frame(
-    shot: Shot, chosen: Path, memory: Memory, visibility: FrameVisibility
+    shot: Shot,
+    chosen: Path,
+    memory: Memory,
+    visibility: FrameVisibility,
+    crop_dir: Path,
 ) -> None:
-    """Algorithm 4 — VLM gates which entities get their memory anchor refreshed.
+    """Algorithm 4 — VLM gates anchor refresh; bbox-cropped where available.
 
-    Paper crops anchors from the chosen frame; we reuse the full frame but
-    skip updates for entities the VLM did not see, so memory does not drift
-    when characters/props are occluded or absent.
+    Characters and props with a bbox are cropped out of the chosen frame and
+    saved as the anchor (paper Tables 27, 29). Without a bbox, the full frame
+    is reused. Locations always use the full frame (Table 28 has no crop).
     """
-    visible_chars = {cv.character_id for cv in visibility.characters if cv.visible}
+    crop_dir.mkdir(parents=True, exist_ok=True)
+    char_visibility = {cv.character_id: cv for cv in visibility.characters}
+    prop_visibility = {pv.prop_id: pv for pv in visibility.props}
+
     for cid, state in shot.character_states.items():
         if state == CharacterState.not_present:
             continue
-        if visibility.characters and cid not in visible_chars:
+        cv = char_visibility.get(cid)
+        if visibility.characters and (cv is None or not cv.visible):
             continue
-        memory.set_character(cid, state, chosen)
+        if cv and cv.bbox:
+            anchor = crop_to_anchor(chosen, cv.bbox, crop_dir / f"char__{cid}__{state}.png")
+        else:
+            anchor = chosen
+        memory.set_character(cid, state, anchor)
 
     if shot.location_id and visibility.location_visible:
         memory.set_location(shot.location_id, chosen)
 
-    visible_props = {pv.prop_id for pv in visibility.props if pv.visible}
     for pid, state in shot.prop_states.items():
         if state in {PropState.not_visible, PropState.not_present}:
             continue
-        if visibility.props and pid not in visible_props:
+        pv = prop_visibility.get(pid)
+        if visibility.props and (pv is None or not pv.visible):
             continue
-        memory.set_prop(pid, state, chosen)
+        if pv and pv.bbox:
+            anchor = crop_to_anchor(chosen, pv.bbox, crop_dir / f"prop__{pid}__{state}.png")
+        else:
+            anchor = chosen
+        memory.set_prop(pid, state, anchor)
