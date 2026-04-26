@@ -62,6 +62,8 @@ class Shot(BaseModel):
 
 
 class LocationClustering(BaseModel):
+    """Output of Table 20 — location_id per shot + name lookup."""
+
     shot_location: list[str] = Field(
         description="location_id for each shot in order (length == num shots)."
     )
@@ -82,6 +84,8 @@ class PropTimeline(BaseModel):
 
 
 class ContinuationDecision(BaseModel):
+    """Output of Table 24 — anchor mode for the current shot."""
+
     continuation_mode: ContinuationMode
     reasoning: str = ""
 

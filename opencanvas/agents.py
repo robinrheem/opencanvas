@@ -287,23 +287,19 @@ def _collect_refs(states: dict[str, str], getter, skip: set[str]) -> list[str]:
     return refs
 
 
-def _character_anchor(memory: Memory, cid: str, current: str, prev: str | None) -> Path | None:
-    """Algorithm 2 §4: appearance changed → canonical first; else recent first."""
-    canonical = memory.characters_canonical.get((cid, current))
-    recent = memory.characters.get((cid, current))
-    return (canonical or recent) if (prev is None or prev != current) else (recent or canonical)
-
-
 def retrieve(shot: Shot, plan: Plan, memory: Memory) -> AnchorSet:
     prev_shot = plan.shots[shot.index - 1] if shot.index > 0 else None
 
-    char_refs = _collect_refs(
-        shot.character_states,
-        lambda cid, st: _character_anchor(
-            memory, cid, st, prev_shot.character_states.get(cid) if prev_shot else None
-        ),
-        {CharacterState.not_present},
-    )
+    def char_anchor(cid: str, state: str) -> Path | None:
+        """Algorithm 2 §4: appearance changed → canonical first; else recent first."""
+        prev_state = prev_shot.character_states.get(cid) if prev_shot else None
+        canonical = memory.characters_canonical.get((cid, state))
+        recent = memory.characters.get((cid, state))
+        if prev_state is None or prev_state != state:
+            return canonical or recent
+        return recent or canonical
+
+    char_refs = _collect_refs(shot.character_states, char_anchor, {CharacterState.not_present})
     prop_refs = _collect_refs(
         shot.prop_states, memory.prop, {PropState.not_visible, PropState.not_present}
     )
@@ -345,7 +341,6 @@ def _segment_rgba(crop: Image.Image, model_name: str) -> Image.Image:
 
 
 def crop_to_anchor(frame_path: Path, bbox: BBox, dest: Path) -> Path:
-    """Crop a normalized BBox out of a frame and save to dest."""
     with Image.open(frame_path) as im:
         box = _bbox_pixels(bbox, im.size)
         (im.crop(box) if box else im).convert("RGB").save(dest)
@@ -495,45 +490,47 @@ async def select(
 # --- Algorithm 4 — VLM visibility extraction (Tables 27, 28, 29) -----------
 
 
-class _CharVisResp(BaseModel):
+class _CharVis(BaseModel):
     characters: list[CharacterVisibility]
 
 
-class _PropVisResp(BaseModel):
+class _PropVis(BaseModel):
     props: list[PropVisibility]
 
 
-class _LocVisResp(BaseModel):
+class _LocVis(BaseModel):
     visible: bool
 
 
-async def _check_chars(shot: Shot, frame: Path, settings: Settings) -> list[CharacterVisibility]:
-    expected = {cid: st for cid, st in shot.character_states.items() if st != CharacterState.not_present}
-    if not expected:
-        return []
-    instr = CHAR_VISIBILITY.format(shot_description=shot.description, expected_characters=expected)
-    return (await _llm(_CharVisResp, instr, ["Inspect the frame.", BinaryContent.from_path(frame)], settings)).characters
-
-
-async def _check_props(shot: Shot, frame: Path, settings: Settings) -> list[PropVisibility]:
-    expected = {pid: st for pid, st in shot.prop_states.items() if st not in {PropState.not_visible, PropState.not_present}}
-    if not expected:
-        return []
-    instr = PROP_VISIBILITY.format(shot_description=shot.description, expected_props=expected)
-    return (await _llm(_PropVisResp, instr, ["Inspect the frame.", BinaryContent.from_path(frame)], settings)).props
-
-
-async def _check_location(shot: Shot, frame: Path, settings: Settings) -> bool:
-    if not shot.location_id:
-        return False
-    instr = BG_VISIBILITY.format(shot_description=shot.description, location=shot.location_id)
-    return (await _llm(_LocVisResp, instr, ["Inspect the frame.", BinaryContent.from_path(frame)], settings)).visible
-
-
 async def extract_visibility(shot: Shot, chosen: Path, settings: Settings) -> FrameVisibility:
-    chars, location_ok, props = await asyncio.gather(
-        _check_chars(shot, chosen, settings),
-        _check_location(shot, chosen, settings),
-        _check_props(shot, chosen, settings),
-    )
-    return FrameVisibility(characters=chars, location_visible=location_ok, props=props)
+    """Three concurrent VLM checks (one per Tables 27/28/29) merged into a FrameVisibility."""
+    parts = ["Inspect the frame.", BinaryContent.from_path(chosen)]
+
+    async def chars() -> list[CharacterVisibility]:
+        expected = {
+            cid: st for cid, st in shot.character_states.items()
+            if st != CharacterState.not_present
+        }
+        if not expected:
+            return []
+        instr = CHAR_VISIBILITY.format(shot_description=shot.description, expected_characters=expected)
+        return (await _llm(_CharVis, instr, parts, settings)).characters
+
+    async def props() -> list[PropVisibility]:
+        expected = {
+            pid: st for pid, st in shot.prop_states.items()
+            if st not in {PropState.not_visible, PropState.not_present}
+        }
+        if not expected:
+            return []
+        instr = PROP_VISIBILITY.format(shot_description=shot.description, expected_props=expected)
+        return (await _llm(_PropVis, instr, parts, settings)).props
+
+    async def location() -> bool:
+        if not shot.location_id:
+            return False
+        instr = BG_VISIBILITY.format(shot_description=shot.description, location=shot.location_id)
+        return (await _llm(_LocVis, instr, parts, settings)).visible
+
+    c, l, p = await asyncio.gather(chars(), location(), props())
+    return FrameVisibility(characters=c, location_visible=l, props=p)
