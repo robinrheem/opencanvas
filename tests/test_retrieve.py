@@ -47,7 +47,7 @@ def _shot(
 def test_fresh_location_returns_char_only(tmp_path: Path):
     m = Memory.empty(tmp_path / "mem")
     src = _img(tmp_path / "a.png")
-    m.set_character("char-ada", "default", src)
+    m.add_character("char-ada", "default", src)
     shot = _shot(0, "loc-a", ContinuationMode.fresh_location)
     anchors = retrieve(shot, _make_plan([shot]), m)
 
@@ -59,8 +59,8 @@ def test_fresh_location_returns_char_only(tmp_path: Path):
 def test_previous_frame_continuation_uses_prev_frame(tmp_path: Path):
     m = Memory.empty(tmp_path / "mem")
     src = _img(tmp_path / "a.png")
-    m.set_character("char-ada", "default", src)
-    m.set_frame(0, src)
+    m.add_character("char-ada", "default", src)
+    m.add_frame(0, src)
     s0 = _shot(0, "loc-a", ContinuationMode.fresh_location)
     s1 = _shot(1, "loc-a", ContinuationMode.previous_frame_continuation)
     anchors = retrieve(s1, _make_plan([s0, s1]), m)
@@ -73,8 +73,8 @@ def test_previous_frame_continuation_uses_prev_frame(tmp_path: Path):
 def test_location_reappearance_uses_bg_anchor(tmp_path: Path):
     m = Memory.empty(tmp_path / "mem")
     src = _img(tmp_path / "a.png")
-    m.set_character("char-ada", "default", src)
-    m.set_location("loc-a", src)
+    m.add_character("char-ada", "default", src)
+    m.add_location("loc-a", src)
     shots = [
         _shot(0, "loc-a", ContinuationMode.fresh_location),
         _shot(1, "loc-b", ContinuationMode.fresh_location),
@@ -90,8 +90,8 @@ def test_location_reappearance_uses_bg_anchor(tmp_path: Path):
 def test_prop_anchor_included_when_visible(tmp_path: Path):
     m = Memory.empty(tmp_path / "mem")
     src = _img(tmp_path / "a.png")
-    m.set_character("char-ada", "default", src)
-    m.set_prop("prop-journal", "intact", src)
+    m.add_character("char-ada", "default", src)
+    m.add_prop("prop-journal", "intact", src)
     shot = _shot(0, "loc-a", ContinuationMode.fresh_location, props={"prop-journal": "intact"})
     anchors = retrieve(shot, _make_plan([shot]), m)
     assert len(anchors.prop_refs) == 1
@@ -100,8 +100,8 @@ def test_prop_anchor_included_when_visible(tmp_path: Path):
 def test_prop_anchor_skipped_when_not_visible(tmp_path: Path):
     m = Memory.empty(tmp_path / "mem")
     src = _img(tmp_path / "a.png")
-    m.set_character("char-ada", "default", src)
-    m.set_prop("prop-journal", "intact", src)
+    m.add_character("char-ada", "default", src)
+    m.add_prop("prop-journal", "intact", src)
     shot = _shot(0, "loc-a", ContinuationMode.fresh_location, props={"prop-journal": "not_visible"})
     anchors = retrieve(shot, _make_plan([shot]), m)
     assert anchors.prop_refs == []
@@ -111,8 +111,8 @@ def test_canonical_used_when_appearance_changes(tmp_path: Path):
     """Algorithm 2: appearance_state changed across shots → prefer canonical anchor."""
     m = Memory.empty(tmp_path / "mem")
     src = _img(tmp_path / "tuxedo.png")
-    m.set_character_canonical("char-ada", "tuxedo", src)
-    m.set_character("char-ada", "tuxedo", src)
+    m.add_canonical("char-ada", "tuxedo", src)
+    m.add_character("char-ada", "tuxedo", src)
 
     s0 = _shot(0, "loc-a", ContinuationMode.fresh_location, chars={"char-ada": "default"})
     s1 = _shot(1, "loc-a", ContinuationMode.previous_frame_continuation, chars={"char-ada": "tuxedo"})
@@ -125,8 +125,8 @@ def test_canonical_used_when_appearance_changes(tmp_path: Path):
 def test_recent_used_when_state_unchanged(tmp_path: Path):
     m = Memory.empty(tmp_path / "mem")
     src = _img(tmp_path / "tuxedo.png")
-    m.set_character_canonical("char-ada", "tuxedo", src)
-    m.set_character("char-ada", "tuxedo", src)
+    m.add_canonical("char-ada", "tuxedo", src)
+    m.add_character("char-ada", "tuxedo", src)
 
     s0 = _shot(0, "loc-a", ContinuationMode.fresh_location, chars={"char-ada": "tuxedo"})
     s1 = _shot(1, "loc-a", ContinuationMode.previous_frame_continuation, chars={"char-ada": "tuxedo"})

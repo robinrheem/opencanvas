@@ -7,7 +7,7 @@ from pathlib import Path
 from PIL import Image
 
 from opencanvas.config import Settings
-from opencanvas.pipeline import run
+from opencanvas.pipeline import run_sync as run
 from opencanvas.schemas import Story
 
 

@@ -3,9 +3,9 @@
 Planner is four sub-calls (Tables 20, 22, 23, 24) plus background plan (Table 21).
 Judge uses Table 26 axes. Visibility extraction uses Tables 27, 28, 29.
 
-Internals are async + dispatched via `asyncio.gather`. `plan` is the only
-synchronous wrapper exposed (CLI convenience); pipeline awaits internals
-directly.
+All LLM-touching functions are async by default (`plan`, `select`,
+`extract_visibility`). `plan_sync` exists as a thin sync wrapper for the CLI;
+everything else awaits via `asyncio.gather` from `pipeline.run`.
 """
 
 from __future__ import annotations
@@ -204,7 +204,7 @@ async def _plan_background(shot: Shot, prop_history: list[dict], settings: Setti
 # --- Main planner ------------------------------------------------------------
 
 
-async def plan_async(story: Story, settings: Settings) -> Plan:
+async def plan(story: Story, settings: Settings) -> Plan:
     """Global Planner Agent (§3.1) = Tables 20 + 22 + 23 + 24 + 21, gathered."""
     cluster = await _cluster_locations(story, settings)
 
@@ -265,9 +265,9 @@ async def plan_async(story: Story, settings: Settings) -> Plan:
     )
 
 
-def plan(story: Story, settings: Settings) -> Plan:
-    """Synchronous wrapper for `plan_async` (CLI convenience)."""
-    return asyncio.run(plan_async(story, settings))
+def plan_sync(story: Story, settings: Settings) -> Plan:
+    """Synchronous wrapper for `plan` (CLI convenience)."""
+    return asyncio.run(plan(story, settings))
 
 
 # --- Anchor retrieval (Algorithm 2) -----------------------------------------
@@ -289,7 +289,7 @@ def _collect_refs(states: dict[str, str], getter, skip: set[str]) -> list[str]:
 
 def _character_anchor(memory: Memory, cid: str, current: str, prev: str | None) -> Path | None:
     """Algorithm 2 §4: appearance changed → canonical first; else recent first."""
-    canonical = memory.get_character_canonical(cid, current)
+    canonical = memory.characters_canonical.get((cid, current))
     recent = memory.characters.get((cid, current))
     return (canonical or recent) if (prev is None or prev != current) else (recent or canonical)
 
@@ -305,21 +305,15 @@ def retrieve(shot: Shot, plan: Plan, memory: Memory) -> AnchorSet:
         {CharacterState.not_present},
     )
     prop_refs = _collect_refs(
-        shot.prop_states,
-        lambda pid, st: (
-            memory.get_prop(pid, st)
-            or memory.get_prop(pid, PropState.default)
-            or memory.get_prop_any_state(pid)
-        ),
-        {PropState.not_visible, PropState.not_present},
+        shot.prop_states, memory.prop, {PropState.not_visible, PropState.not_present}
     )
     anchors = AnchorSet(character_refs=char_refs, prop_refs=prop_refs)
 
     if shot.continuation_mode is ContinuationMode.previous_frame_continuation:
-        prev = memory.get_frame(shot.index - 1)
+        prev = memory.frames.get(shot.index - 1)
         anchors.previous_frame = str(prev) if prev else None
     elif shot.continuation_mode is ContinuationMode.location_reappearance and shot.location_id:
-        loc = memory.get_location(shot.location_id)
+        loc = memory.locations.get(shot.location_id)
         anchors.location_ref = str(loc) if loc else None
 
     return anchors
@@ -472,7 +466,7 @@ def generate(
 # --- QA-based selection (Algorithm 3 + Table 26) ----------------------------
 
 
-async def select_async(
+async def select(
     candidates: list[Path], shot: Shot, memory: Memory, settings: Settings,
 ) -> tuple[Path, list[CandidateScore]]:
     judge_prompt = JUDGE_SCORING.format(
@@ -481,7 +475,7 @@ async def select_async(
         prop_states=_format_states(shot.prop_states),
         location=shot.location_id or "(unknown)",
     )
-    prev_frame = memory.get_frame(shot.index - 1)
+    prev_frame = memory.frames.get(shot.index - 1)
     prev_part = ["Previous frame:", BinaryContent.from_path(prev_frame)] if prev_frame else []
 
     async def _score(i: int, cand: Path) -> CandidateScore:
@@ -536,7 +530,7 @@ async def _check_location(shot: Shot, frame: Path, settings: Settings) -> bool:
     return (await _llm(_LocVisResp, instr, ["Inspect the frame.", BinaryContent.from_path(frame)], settings)).visible
 
 
-async def extract_visibility_async(shot: Shot, chosen: Path, settings: Settings) -> FrameVisibility:
+async def extract_visibility(shot: Shot, chosen: Path, settings: Settings) -> FrameVisibility:
     chars, location_ok, props = await asyncio.gather(
         _check_chars(shot, chosen, settings),
         _check_location(shot, chosen, settings),

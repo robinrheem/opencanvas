@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from opencanvas.agents import plan
+from opencanvas.agents import plan_sync as plan
 from opencanvas.config import Settings
 from opencanvas.schemas import Plan, Story
 

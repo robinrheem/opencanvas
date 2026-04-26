@@ -46,23 +46,23 @@ def test_crop_to_anchor_degenerate_falls_back_to_full(tmp_path: Path):
         assert out.size == (100, 100)
 
 
-def test_get_prop_any_state_returns_most_recent(tmp_path: Path):
+def test_prop_any_state_returns_most_recent(tmp_path: Path):
     src = tmp_path / "src.png"
     Image.new("RGB", (4, 4)).save(src)
     m = Memory.empty(tmp_path / "mem")
-    m.set_prop("prop-journal", "intact", src)
-    m.set_prop("prop-journal", "burned", src)
-    m.set_prop("other-prop", "default", src)
+    m.add_prop("prop-journal", "intact", src)
+    m.add_prop("prop-journal", "burned", src)
+    m.add_prop("other-prop", "default", src)
 
-    found = m.get_prop_any_state("prop-journal")
+    found = m.prop_any_state("prop-journal")
     assert found is not None
     # Most recent insertion order = "burned"
     assert "burned" in str(found)
 
 
-def test_get_prop_any_state_unknown_returns_none(tmp_path: Path):
+def test_prop_any_state_unknown_returns_none(tmp_path: Path):
     m = Memory.empty(tmp_path / "mem")
-    assert m.get_prop_any_state("nonexistent") is None
+    assert m.prop_any_state("nonexistent") is None
 
 
 def test_format_prop_states_with_carriers():

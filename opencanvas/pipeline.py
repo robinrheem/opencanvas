@@ -14,12 +14,12 @@ from .agents import (
     ImagePipeline,
     crop_to_anchor,
     extract_location_anchor,
-    extract_visibility_async,
+    extract_visibility,
     generate,
-    plan_async,
+    plan,
     retrieve,
     segment_to_anchor,
-    select_async,
+    select,
 )
 from .config import CACHE_TAG_GENERATE, Settings
 from .memory import Memory
@@ -63,7 +63,7 @@ def _seed_canonical_anchors(story: Story, memory: Memory) -> None:
         if not c.reference_image:
             continue
         try:
-            memory.set_character_canonical(c.id, "default", Path(c.reference_image))
+            memory.add_canonical(c.id, "default", Path(c.reference_image))
         except FileNotFoundError:
             continue
 
@@ -92,7 +92,7 @@ def _write_results(out_dir: Path, results: list[ShotResult]) -> None:
     (out_dir / "results.json").write_bytes(_RESULTS_ADAPTER.dump_json(summary, indent=2))
 
 
-def _extract_subject_anchor(chosen: Path, bbox, dest: Path, settings: Settings) -> Path:
+def _subject_anchor(chosen: Path, bbox, dest: Path, settings: Settings) -> Path:
     """Crop a subject anchor; segment + neutral-fill when enabled."""
     if settings.enable_segmentation:
         return segment_to_anchor(
@@ -102,13 +102,12 @@ def _extract_subject_anchor(chosen: Path, bbox, dest: Path, settings: Settings) 
     return crop_to_anchor(chosen, bbox, dest)
 
 
-def _update_subjects(
-    shot: Shot, chosen: Path, memory: Memory,
-    visibility_items: list, expected_states: dict[str, str], skip_states: set[str],
-    set_anchor: Callable[[str, str, Path], None], file_prefix: str,
-    crop_dir: Path, settings: Settings,
+def _refresh_subject_anchors(
+    chosen: Path, visibility_items: list, expected_states: dict[str, str],
+    skip_states: set[str], add_anchor: Callable[[str, str, Path], Path],
+    file_prefix: str, crop_dir: Path, settings: Settings,
 ) -> None:
-    """Refresh memory anchors for a single entity kind (chars OR props)."""
+    """Refresh memory anchors for chars or props (same shape, differs only by add_anchor)."""
     by_id = {v[0]: v for v in visibility_items}  # id -> (id, visible, bbox)
     for entity_id, state in expected_states.items():
         if state in skip_states:
@@ -118,32 +117,32 @@ def _update_subjects(
             continue
         bbox = item[2] if item else None
         if bbox:
-            anchor = _extract_subject_anchor(
+            anchor = _subject_anchor(
                 chosen, bbox, crop_dir / f"{file_prefix}__{entity_id}__{state}.png", settings
             )
         else:
             anchor = chosen
-        set_anchor(entity_id, state, anchor)
+        add_anchor(entity_id, state, anchor)
 
 
-def _update_anchors_from_frame(
+def _refresh_anchors(
     shot: Shot, chosen: Path, memory: Memory, visibility: FrameVisibility,
     crop_dir: Path, settings: Settings,
 ) -> None:
     """Algorithm 4 — VLM gates anchor refresh; subject-only anchors via bbox + segmentation."""
     crop_dir.mkdir(parents=True, exist_ok=True)
 
-    _update_subjects(
-        shot, chosen, memory,
+    _refresh_subject_anchors(
+        chosen,
         [(cv.character_id, cv.visible, cv.bbox) for cv in visibility.characters],
         shot.character_states, {CharacterState.not_present},
-        memory.set_character, "char", crop_dir, settings,
+        memory.add_character, "char", crop_dir, settings,
     )
-    _update_subjects(
-        shot, chosen, memory,
+    _refresh_subject_anchors(
+        chosen,
         [(pv.prop_id, pv.visible, pv.bbox) for pv in visibility.props],
         shot.prop_states, {PropState.not_visible, PropState.not_present},
-        memory.set_prop, "prop", crop_dir, settings,
+        memory.add_prop, "prop", crop_dir, settings,
     )
 
     if shot.location_id and visibility.location_visible:
@@ -158,10 +157,10 @@ def _update_anchors_from_frame(
             )
         else:
             anchor = chosen
-        memory.set_location(shot.location_id, anchor)
+        memory.add_location(shot.location_id, anchor)
 
 
-async def run_async(
+async def run(
     story: Story, settings: Settings,
     image_pipeline: ImagePipeline | None = None,
     seed_maker: Callable[[Shot], int] | None = None,
@@ -172,7 +171,7 @@ async def run_async(
     pipe = image_pipeline if image_pipeline is not None else _load_image_pipeline(settings)
     seed_of = seed_maker or (lambda s: settings.seed + s.index * settings.seed_stride)
 
-    p = await plan_async(story, settings)
+    p = await plan(story, settings)
     (settings.out_dir / "plan.json").write_text(p.model_dump_json(indent=2))
     bg_by_shot = {bp.shot_index: bp for bp in p.background_plans}
 
@@ -184,11 +183,11 @@ async def run_async(
                 cache, shot, anchors, bg_by_shot.get(shot.index),
                 settings, pipe, seed=seed_of(shot),
             )
-            chosen, scores = await select_async(candidates, shot, memory, settings)
+            chosen, scores = await select(candidates, shot, memory, settings)
 
-            memory.set_frame(shot.index, chosen)
-            visibility = await extract_visibility_async(shot, chosen, settings)
-            _update_anchors_from_frame(
+            memory.add_frame(shot.index, chosen)
+            visibility = await extract_visibility(shot, chosen, settings)
+            _refresh_anchors(
                 shot, chosen, memory, visibility,
                 crop_dir=settings.out_dir / "crops" / f"shot_{shot.index:04d}",
                 settings=settings,
@@ -204,10 +203,10 @@ async def run_async(
     return p, results
 
 
-def run(
+def run_sync(
     story: Story, settings: Settings,
     image_pipeline: ImagePipeline | None = None,
     seed_maker: Callable[[Shot], int] | None = None,
 ) -> tuple[Plan, list[ShotResult]]:
-    """Synchronous wrapper for `run_async`."""
-    return asyncio.run(run_async(story, settings, image_pipeline, seed_maker))
+    """Synchronous wrapper for `run`."""
+    return asyncio.run(run(story, settings, image_pipeline, seed_maker))

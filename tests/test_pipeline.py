@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from opencanvas.config import Settings
-from opencanvas.pipeline import run
+from opencanvas.pipeline import run_sync as run
 from opencanvas.schemas import Story
 
 
