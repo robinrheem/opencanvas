@@ -17,6 +17,7 @@ from .agents import (
     generate,
     plan_async,
     retrieve,
+    segment_to_anchor,
     select_async,
 )
 from .config import CACHE_TAG_GENERATE, Settings
@@ -127,6 +128,7 @@ async def run_async(
             _update_anchors_from_frame(
                 shot, chosen, memory, visibility,
                 crop_dir=settings.out_dir / "crops" / f"shot_{shot.index:04d}",
+                settings=settings,
             )
             memory.save()
 
@@ -151,18 +153,35 @@ def run(
     return asyncio.run(run_async(story, settings, image_pipeline, seed_maker))
 
 
+def _extract_anchor(
+    chosen: Path, bbox, dest: Path, settings: Settings
+) -> Path:
+    """Crop subject from chosen frame; optionally segment + composite on neutral bg
+    to suppress background drift in downstream multi-ref generation."""
+    if settings.enable_segmentation:
+        return segment_to_anchor(
+            chosen, bbox, dest,
+            model_name=settings.segment_model,
+            bg_color=settings.segment_bg_color,
+        )
+    return crop_to_anchor(chosen, bbox, dest)
+
+
 def _update_anchors_from_frame(
     shot: Shot,
     chosen: Path,
     memory: Memory,
     visibility: FrameVisibility,
     crop_dir: Path,
+    settings: Settings,
 ) -> None:
-    """Algorithm 4 — VLM gates anchor refresh; bbox-cropped where available.
+    """Algorithm 4 — VLM gates anchor refresh; subject-only anchors via bbox + segmentation.
 
-    Characters and props with a bbox are cropped out of the chosen frame and
-    saved as the anchor (paper Tables 27, 29). Without a bbox, the full frame
-    is reused. Locations always use the full frame (Table 28 has no crop).
+    Characters and props with a bbox are extracted from the chosen frame
+    (Tables 27, 29). When `settings.enable_segmentation` is True, the bbox crop
+    is further bg-removed and composited onto a neutral mid-gray plate so the
+    anchor carries identity but not the chosen frame's environment. Locations
+    use the full frame (Table 28 prescribes no crop).
     """
     crop_dir.mkdir(parents=True, exist_ok=True)
     char_visibility = {cv.character_id: cv for cv in visibility.characters}
@@ -175,7 +194,9 @@ def _update_anchors_from_frame(
         if visibility.characters and (cv is None or not cv.visible):
             continue
         if cv and cv.bbox:
-            anchor = crop_to_anchor(chosen, cv.bbox, crop_dir / f"char__{cid}__{state}.png")
+            anchor = _extract_anchor(
+                chosen, cv.bbox, crop_dir / f"char__{cid}__{state}.png", settings
+            )
         else:
             anchor = chosen
         memory.set_character(cid, state, anchor)
@@ -190,7 +211,9 @@ def _update_anchors_from_frame(
         if visibility.props and (pv is None or not pv.visible):
             continue
         if pv and pv.bbox:
-            anchor = crop_to_anchor(chosen, pv.bbox, crop_dir / f"prop__{pid}__{state}.png")
+            anchor = _extract_anchor(
+                chosen, pv.bbox, crop_dir / f"prop__{pid}__{state}.png", settings
+            )
         else:
             anchor = chosen
         memory.set_prop(pid, state, anchor)

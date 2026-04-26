@@ -387,6 +387,52 @@ def crop_to_anchor(frame_path: Path, bbox, dest: Path) -> Path:
     return dest
 
 
+@lru_cache(maxsize=2)
+def _rembg_session(model_name: str):
+    from rembg import new_session
+
+    return new_session(model_name)
+
+
+def segment_to_anchor(
+    frame_path: Path,
+    bbox,
+    dest: Path,
+    model_name: str = "birefnet-general",
+    bg_color: tuple[int, int, int] = (128, 128, 128),
+) -> Path:
+    """Bbox-crop a region, then segment subject and composite onto neutral bg.
+
+    Mitigates the background-drift problem when reference images are passed to
+    multi-image edit models (Qwen-Image-Edit-2509 etc.): without segmentation,
+    the reference's background pixels condition the generator alongside the
+    subject, causing the output to inherit the reference's setting.
+    """
+    from PIL import Image
+    from rembg import remove
+
+    with Image.open(frame_path) as im:
+        w, h = im.size
+        left = max(0, int(bbox.x * w))
+        top = max(0, int(bbox.y * h))
+        right = min(w, int((bbox.x + bbox.w) * w))
+        bottom = min(h, int((bbox.y + bbox.h) * h))
+        if right <= left or bottom <= top:
+            im.convert("RGB").save(dest)
+            return dest
+        crop = im.crop((left, top, right, bottom)).convert("RGB")
+
+    session = _rembg_session(model_name)
+    foreground = remove(crop, session=session, post_process_mask=True)
+    if foreground.mode != "RGBA":
+        foreground = foreground.convert("RGBA")
+
+    bg = Image.new("RGBA", foreground.size, (*bg_color, 255))
+    composite = Image.alpha_composite(bg, foreground).convert("RGB")
+    composite.save(dest)
+    return dest
+
+
 def _load_refs(paths: list[str]):
     from PIL import Image
 

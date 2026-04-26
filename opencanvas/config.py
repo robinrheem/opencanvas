@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     cache_dir: Path = Path("./cache")
     out_dir: Path = Path("./out")
 
+    # Anchor extraction (Algorithm 4)
+    segment_model: str = "birefnet-general"
+    segment_bg_color: tuple[int, int, int] = (128, 128, 128)
+    enable_segmentation: bool = True
+
     def ensure_dirs(self) -> None:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)

@@ -77,3 +77,68 @@ def test_format_prop_states_with_carriers():
 
 def test_format_prop_states_empty():
     assert _format_prop_states_with_carriers({}, {}) == "(none)"
+
+
+def test_segment_to_anchor_composites_subject_on_neutral_bg(tmp_path: Path, monkeypatch):
+    """rembg returns RGBA with alpha mask; segment_to_anchor composites onto bg_color."""
+    import opencanvas.agents as agents_mod
+    from opencanvas.agents import segment_to_anchor
+
+    def _fake_remove(crop, session=None, post_process_mask=False):
+        # Pretend rembg kept the centre 50% as foreground, made the rest transparent.
+        w, h = crop.size
+        out = Image.new("RGBA", (w, h), (255, 0, 0, 0))  # transparent red
+        cx0, cy0 = w // 4, h // 4
+        cx1, cy1 = (3 * w) // 4, (3 * h) // 4
+        for x in range(cx0, cx1):
+            for y in range(cy0, cy1):
+                out.putpixel((x, y), (255, 0, 0, 255))  # opaque red
+        return out
+
+    monkeypatch.setattr(agents_mod, "_rembg_session", lambda model_name: None)
+    monkeypatch.setattr("rembg.remove", _fake_remove)
+
+    src = tmp_path / "frame.png"
+    Image.new("RGB", (100, 100), color=(0, 0, 0)).save(src)
+    dest = tmp_path / "anchor.png"
+
+    segment_to_anchor(
+        src,
+        BBox(x=0.0, y=0.0, w=1.0, h=1.0),
+        dest,
+        model_name="ignored",
+        bg_color=(50, 60, 70),
+    )
+
+    with Image.open(dest) as out:
+        # Top-left pixel was transparent in the mock → reveals neutral bg
+        assert out.getpixel((1, 1)) == (50, 60, 70)
+        # Centre pixel was opaque red → preserved
+        assert out.getpixel((50, 50)) == (255, 0, 0)
+
+
+def test_segment_to_anchor_degenerate_bbox_falls_back(tmp_path: Path, monkeypatch):
+    """Degenerate bbox short-circuits before rembg is touched."""
+    import opencanvas.agents as agents_mod
+    from opencanvas.agents import segment_to_anchor
+
+    called = {"n": 0}
+
+    def _fake_remove(*a, **kw):
+        called["n"] += 1
+        raise RuntimeError("must not be called")
+
+    monkeypatch.setattr(agents_mod, "_rembg_session", lambda model_name: None)
+    monkeypatch.setattr("rembg.remove", _fake_remove)
+
+    src = tmp_path / "frame.png"
+    Image.new("RGB", (100, 100), color=(10, 20, 30)).save(src)
+    dest = tmp_path / "anchor.png"
+
+    segment_to_anchor(
+        src, BBox(x=1.0, y=1.0, w=0.01, h=0.01), dest, model_name="ignored"
+    )
+
+    assert called["n"] == 0
+    with Image.open(dest) as out:
+        assert out.size == (100, 100)
