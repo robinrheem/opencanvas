@@ -69,12 +69,14 @@ class LocationClustering(BaseModel):
 
 
 class CharacterTimeline(BaseModel):
-    character_id: str
+    """Output of Table 22 — appearance state per shot."""
+
     appearance_by_shot: list[str]
 
 
 class PropTimeline(BaseModel):
-    prop_id: str
+    """Output of Table 23 — state + carrier per shot."""
+
     state_by_shot: list[str]
     carrier_by_shot: list[str | None] = Field(default_factory=list)
 

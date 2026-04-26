@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-opencanvas = "opencanvas.main:main"
+opencanvas = "opencanvas.cli:main"
 
 [build-system]
 requires = ["hatchling"]

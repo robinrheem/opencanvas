@@ -6,24 +6,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 _SUBDIRS = ("characters", "characters_canonical", "locations", "props", "frames")
-_TUPLE_SEP = "::"
+_SEP = "::"
 
 
-def _dump_tuple_dict(d: dict[tuple[str, str], Path], root: Path) -> dict[str, str]:
-    return {f"{a}{_TUPLE_SEP}{b}": str(p.relative_to(root)) for (a, b), p in d.items()}
+def _dump_pairs(d: dict[tuple[str, str], Path], root: Path) -> dict[str, str]:
+    return {f"{a}{_SEP}{b}": str(p.relative_to(root)) for (a, b), p in d.items()}
 
 
-def _parse_tuple_dict(d: dict, root: Path) -> dict[tuple[str, str], Path]:
-    return {tuple(k.split(_TUPLE_SEP, 1)): root / v for k, v in d.items()}
+def _parse_pairs(d: dict, root: Path) -> dict[tuple[str, str], Path]:
+    return {tuple(k.split(_SEP, 1)): root / v for k, v in d.items()}
+
+
+def _parse_str_keys(d: dict, root: Path) -> dict[str, Path]:
+    return {k: root / v for k, v in d.items()}
+
+
+def _dump_str_keys(d: dict[object, Path], root: Path) -> dict[str, str]:
+    return {str(k): str(v.relative_to(root)) for k, v in d.items()}
 
 
 @dataclass
 class Memory:
-    """Paper's visual state memory ℳ = (ℳ_c, ℳ_l, ℳ_o, ℳ_f).
-
-    Canonical character anchors live separately and are never overwritten by
-    `set_character`.
-    """
+    """Visual state memory ℳ = (ℳ_c, ℳ_l, ℳ_o, ℳ_f) plus canonical anchors."""
 
     root: Path
     characters: dict[tuple[str, str], Path] = field(default_factory=dict)
@@ -45,25 +49,25 @@ class Memory:
         manifest = root / "manifest.json"
         if not manifest.exists():
             return cls.empty(root)
-        raw = json.loads(manifest.read_text())
         for sub in _SUBDIRS:
             (root / sub).mkdir(parents=True, exist_ok=True)
+        raw = json.loads(manifest.read_text())
         return cls(
             root=root,
-            characters=_parse_tuple_dict(raw.get("characters", {}), root),
-            characters_canonical=_parse_tuple_dict(raw.get("characters_canonical", {}), root),
-            locations={k: root / v for k, v in raw.get("locations", {}).items()},
-            props=_parse_tuple_dict(raw.get("props", {}), root),
+            characters=_parse_pairs(raw.get("characters", {}), root),
+            characters_canonical=_parse_pairs(raw.get("characters_canonical", {}), root),
+            locations=_parse_str_keys(raw.get("locations", {}), root),
+            props=_parse_pairs(raw.get("props", {}), root),
             frames={int(k): root / v for k, v in raw.get("frames", {}).items()},
         )
 
     def save(self) -> None:
         manifest = {
-            "characters": _dump_tuple_dict(self.characters, self.root),
-            "characters_canonical": _dump_tuple_dict(self.characters_canonical, self.root),
-            "locations": {k: str(v.relative_to(self.root)) for k, v in self.locations.items()},
-            "props": _dump_tuple_dict(self.props, self.root),
-            "frames": {str(k): str(v.relative_to(self.root)) for k, v in self.frames.items()},
+            "characters": _dump_pairs(self.characters, self.root),
+            "characters_canonical": _dump_pairs(self.characters_canonical, self.root),
+            "locations": _dump_str_keys(self.locations, self.root),
+            "props": _dump_pairs(self.props, self.root),
+            "frames": _dump_str_keys(self.frames, self.root),
         }
         (self.root / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -73,53 +77,45 @@ class Memory:
             shutil.copyfile(src, dest)
         return dest
 
-    def set_character(self, character_id: str, state: str, path: Path) -> Path:
-        self.characters[(character_id, state)] = self._store(
-            "characters", f"{character_id}__{state}", path
+    def set_character(self, cid: str, state: str, src: Path) -> Path:
+        self.characters[(cid, state)] = self._store("characters", f"{cid}__{state}", src)
+        return self.characters[(cid, state)]
+
+    def set_character_canonical(self, cid: str, state: str, src: Path) -> Path:
+        self.characters_canonical[(cid, state)] = self._store(
+            "characters_canonical", f"{cid}__{state}", src
         )
-        return self.characters[(character_id, state)]
+        return self.characters_canonical[(cid, state)]
 
-    def set_character_canonical(self, character_id: str, state: str, path: Path) -> Path:
-        self.characters_canonical[(character_id, state)] = self._store(
-            "characters_canonical", f"{character_id}__{state}", path
-        )
-        return self.characters_canonical[(character_id, state)]
+    def set_location(self, lid: str, src: Path) -> Path:
+        self.locations[lid] = self._store("locations", lid, src)
+        return self.locations[lid]
 
-    def set_location(self, location_id: str, path: Path) -> Path:
-        self.locations[location_id] = self._store("locations", location_id, path)
-        return self.locations[location_id]
+    def set_prop(self, pid: str, state: str, src: Path) -> Path:
+        self.props[(pid, state)] = self._store("props", f"{pid}__{state}", src)
+        return self.props[(pid, state)]
 
-    def set_prop(self, prop_id: str, state: str, path: Path) -> Path:
-        self.props[(prop_id, state)] = self._store("props", f"{prop_id}__{state}", path)
-        return self.props[(prop_id, state)]
+    def set_frame(self, idx: int, src: Path) -> Path:
+        self.frames[idx] = self._store("frames", f"shot_{idx:04d}", src)
+        return self.frames[idx]
 
-    def set_frame(self, shot_index: int, path: Path) -> Path:
-        self.frames[shot_index] = self._store("frames", f"shot_{shot_index:04d}", path)
-        return self.frames[shot_index]
+    def get_character(self, cid: str, state: str) -> Path | None:
+        return self.characters.get((cid, state)) or self.characters_canonical.get((cid, state))
 
-    def get_character(self, character_id: str, state: str) -> Path | None:
-        return self.characters.get((character_id, state)) or self.characters_canonical.get(
-            (character_id, state)
-        )
+    def get_character_canonical(self, cid: str, state: str) -> Path | None:
+        return self.characters_canonical.get((cid, state))
 
-    def get_character_canonical(self, character_id: str, state: str) -> Path | None:
-        return self.characters_canonical.get((character_id, state))
+    def get_location(self, lid: str) -> Path | None:
+        return self.locations.get(lid)
 
-    def get_location(self, location_id: str) -> Path | None:
-        return self.locations.get(location_id)
+    def get_prop(self, pid: str, state: str) -> Path | None:
+        return self.props.get((pid, state))
 
-    def get_prop(self, prop_id: str, state: str) -> Path | None:
-        return self.props.get((prop_id, state))
-
-    def get_prop_any_state(self, prop_id: str) -> Path | None:
-        """Algorithm 2 step 6: 'if prop has appeared previously in the story'.
-
-        Returns the most recently set anchor for any state of the prop.
-        """
-        for (pid, _state), p in reversed(self.props.items()):
-            if pid == prop_id:
-                return p
+    def get_prop_any_state(self, pid: str) -> Path | None:
+        for (p, _), path in reversed(self.props.items()):
+            if p == pid:
+                return path
         return None
 
-    def get_frame(self, shot_index: int) -> Path | None:
-        return self.frames.get(shot_index)
+    def get_frame(self, idx: int) -> Path | None:
+        return self.frames.get(idx)

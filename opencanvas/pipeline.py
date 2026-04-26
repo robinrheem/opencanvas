@@ -38,6 +38,15 @@ from .schemas import (
 )
 
 
+@dataclass
+class ShotResult:
+    shot: Shot
+    anchors: AnchorSet
+    candidates: list[Path]
+    scores: list[CandidateScore]
+    chosen: Path
+
+
 def _load_image_pipeline(settings: Settings) -> ImagePipeline:
     import torch
     from diffusers import QwenImageEditPlusPipeline
@@ -47,15 +56,6 @@ def _load_image_pipeline(settings: Settings) -> ImagePipeline:
     ).to("cuda")
     pipe.set_progress_bar_config(disable=True)
     return pipe
-
-
-@dataclass
-class ShotResult:
-    shot: Shot
-    anchors: AnchorSet
-    candidates: list[Path]
-    scores: list[CandidateScore]
-    chosen: Path
 
 
 def _seed_canonical_anchors(story: Story, memory: Memory) -> None:
@@ -69,19 +69,14 @@ def _seed_canonical_anchors(story: Story, memory: Memory) -> None:
 
 
 def _cached_generate(
-    cache: Cache,
-    shot: Shot,
-    anchors: AnchorSet,
-    background_plan: BackgroundPlan | None,
-    settings: Settings,
-    pipeline: ImagePipeline,
-    seed: int,
+    cache: Cache, shot: Shot, anchors: AnchorSet, bg_plan: BackgroundPlan | None,
+    settings: Settings, pipeline: ImagePipeline, seed: int,
 ) -> list[Path]:
     key = make_generation_key(shot, anchors, seed, settings.k_candidates)
     hit = cache.get(key)
     if hit and all(Path(p).exists() for p in hit):
         return [Path(p) for p in hit]
-    paths = generate(shot, anchors, background_plan, settings, pipeline, seed=seed)
+    paths = generate(shot, anchors, bg_plan, settings, pipeline, seed=seed)
     cache.set(key, [str(p) for p in paths], tag=CACHE_TAG_GENERATE)
     return paths
 
@@ -97,9 +92,77 @@ def _write_results(out_dir: Path, results: list[ShotResult]) -> None:
     (out_dir / "results.json").write_bytes(_RESULTS_ADAPTER.dump_json(summary, indent=2))
 
 
+def _extract_subject_anchor(chosen: Path, bbox, dest: Path, settings: Settings) -> Path:
+    """Crop a subject anchor; segment + neutral-fill when enabled."""
+    if settings.enable_segmentation:
+        return segment_to_anchor(
+            chosen, bbox, dest,
+            model_name=settings.segment_model, bg_color=settings.segment_bg_color,
+        )
+    return crop_to_anchor(chosen, bbox, dest)
+
+
+def _update_subjects(
+    shot: Shot, chosen: Path, memory: Memory,
+    visibility_items: list, expected_states: dict[str, str], skip_states: set[str],
+    set_anchor: Callable[[str, str, Path], None], file_prefix: str,
+    crop_dir: Path, settings: Settings,
+) -> None:
+    """Refresh memory anchors for a single entity kind (chars OR props)."""
+    by_id = {v[0]: v for v in visibility_items}  # id -> (id, visible, bbox)
+    for entity_id, state in expected_states.items():
+        if state in skip_states:
+            continue
+        item = by_id.get(entity_id)
+        if visibility_items and (item is None or not item[1]):
+            continue
+        bbox = item[2] if item else None
+        if bbox:
+            anchor = _extract_subject_anchor(
+                chosen, bbox, crop_dir / f"{file_prefix}__{entity_id}__{state}.png", settings
+            )
+        else:
+            anchor = chosen
+        set_anchor(entity_id, state, anchor)
+
+
+def _update_anchors_from_frame(
+    shot: Shot, chosen: Path, memory: Memory, visibility: FrameVisibility,
+    crop_dir: Path, settings: Settings,
+) -> None:
+    """Algorithm 4 — VLM gates anchor refresh; subject-only anchors via bbox + segmentation."""
+    crop_dir.mkdir(parents=True, exist_ok=True)
+
+    _update_subjects(
+        shot, chosen, memory,
+        [(cv.character_id, cv.visible, cv.bbox) for cv in visibility.characters],
+        shot.character_states, {CharacterState.not_present},
+        memory.set_character, "char", crop_dir, settings,
+    )
+    _update_subjects(
+        shot, chosen, memory,
+        [(pv.prop_id, pv.visible, pv.bbox) for pv in visibility.props],
+        shot.prop_states, {PropState.not_visible, PropState.not_present},
+        memory.set_prop, "prop", crop_dir, settings,
+    )
+
+    if shot.location_id and visibility.location_visible:
+        if settings.enable_segmentation:
+            subject_bboxes = [
+                cv.bbox for cv in visibility.characters if cv.visible and cv.bbox
+            ] + [pv.bbox for pv in visibility.props if pv.visible and pv.bbox]
+            anchor = extract_location_anchor(
+                chosen, subject_bboxes,
+                crop_dir / f"loc__{shot.location_id}.png",
+                model_name=settings.segment_model, bg_color=settings.segment_bg_color,
+            )
+        else:
+            anchor = chosen
+        memory.set_location(shot.location_id, anchor)
+
+
 async def run_async(
-    story: Story,
-    settings: Settings,
+    story: Story, settings: Settings,
     image_pipeline: ImagePipeline | None = None,
     seed_maker: Callable[[Shot], int] | None = None,
 ) -> tuple[Plan, list[ShotResult]]:
@@ -111,7 +174,6 @@ async def run_async(
 
     p = await plan_async(story, settings)
     (settings.out_dir / "plan.json").write_text(p.model_dump_json(indent=2))
-
     bg_by_shot = {bp.shot_index: bp for bp in p.background_plans}
 
     results: list[ShotResult] = []
@@ -133,100 +195,19 @@ async def run_async(
             )
             memory.save()
 
-            results.append(
-                ShotResult(
-                    shot=shot, anchors=anchors, candidates=candidates,
-                    scores=scores, chosen=chosen,
-                )
-            )
+            results.append(ShotResult(
+                shot=shot, anchors=anchors, candidates=candidates,
+                scores=scores, chosen=chosen,
+            ))
             _write_results(settings.out_dir, results)
 
     return p, results
 
 
 def run(
-    story: Story,
-    settings: Settings,
+    story: Story, settings: Settings,
     image_pipeline: ImagePipeline | None = None,
     seed_maker: Callable[[Shot], int] | None = None,
 ) -> tuple[Plan, list[ShotResult]]:
     """Synchronous wrapper for `run_async`."""
     return asyncio.run(run_async(story, settings, image_pipeline, seed_maker))
-
-
-def _extract_anchor(
-    chosen: Path, bbox, dest: Path, settings: Settings
-) -> Path:
-    """Crop subject from chosen frame; optionally segment + composite on neutral bg
-    to suppress background drift in downstream multi-ref generation."""
-    if settings.enable_segmentation:
-        return segment_to_anchor(
-            chosen, bbox, dest,
-            model_name=settings.segment_model,
-            bg_color=settings.segment_bg_color,
-        )
-    return crop_to_anchor(chosen, bbox, dest)
-
-
-def _update_anchors_from_frame(
-    shot: Shot,
-    chosen: Path,
-    memory: Memory,
-    visibility: FrameVisibility,
-    crop_dir: Path,
-    settings: Settings,
-) -> None:
-    """Algorithm 4 — VLM gates anchor refresh; subject-only anchors via bbox + segmentation.
-
-    Characters and props with a bbox are extracted from the chosen frame
-    (Tables 27, 29). When `settings.enable_segmentation` is True, the bbox crop
-    is further bg-removed and composited onto a neutral mid-gray plate so the
-    anchor carries identity but not the chosen frame's environment. Locations
-    use the full frame (Table 28 prescribes no crop).
-    """
-    crop_dir.mkdir(parents=True, exist_ok=True)
-    char_visibility = {cv.character_id: cv for cv in visibility.characters}
-    prop_visibility = {pv.prop_id: pv for pv in visibility.props}
-
-    for cid, state in shot.character_states.items():
-        if state == CharacterState.not_present:
-            continue
-        cv = char_visibility.get(cid)
-        if visibility.characters and (cv is None or not cv.visible):
-            continue
-        if cv and cv.bbox:
-            anchor = _extract_anchor(
-                chosen, cv.bbox, crop_dir / f"char__{cid}__{state}.png", settings
-            )
-        else:
-            anchor = chosen
-        memory.set_character(cid, state, anchor)
-
-    if shot.location_id and visibility.location_visible:
-        if settings.enable_segmentation:
-            subject_bboxes = [
-                cv.bbox for cv in visibility.characters if cv.visible and cv.bbox
-            ] + [pv.bbox for pv in visibility.props if pv.visible and pv.bbox]
-            loc_dest = crop_dir / f"loc__{shot.location_id}.png"
-            anchor = extract_location_anchor(
-                chosen, subject_bboxes, loc_dest,
-                model_name=settings.segment_model,
-                bg_color=settings.segment_bg_color,
-            )
-        else:
-            anchor = chosen
-        memory.set_location(shot.location_id, anchor)
-
-    for pid, state in shot.prop_states.items():
-        if state in {PropState.not_visible, PropState.not_present}:
-            continue
-        pv = prop_visibility.get(pid)
-        if visibility.props and (pv is None or not pv.visible):
-            continue
-        if pv and pv.bbox:
-            anchor = _extract_anchor(
-                chosen, pv.bbox, crop_dir / f"prop__{pid}__{state}.png", settings
-            )
-        else:
-            anchor = chosen
-        memory.set_prop(pid, state, anchor)

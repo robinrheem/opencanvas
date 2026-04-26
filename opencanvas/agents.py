@@ -1,10 +1,11 @@
 """The CANVAS agents — paper-faithful split.
 
-Planner is four sub-calls (Tables 20, 22, 23, 24). Judge uses Table 26 axes.
+Planner is four sub-calls (Tables 20, 22, 23, 24) plus background plan (Table 21).
+Judge uses Table 26 axes. Visibility extraction uses Tables 27, 28, 29.
 
-Internals are async and dispatched concurrently via `asyncio.gather`. Public
-sync wrappers (`plan`, `select`) drive an event loop via `asyncio.run` for
-callers that prefer a synchronous API.
+Internals are async + dispatched via `asyncio.gather`. `plan` is the only
+synchronous wrapper exposed (CLI convenience); pipeline awaits internals
+directly.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, TypeVar
 
+from PIL import Image
 from pydantic import BaseModel
 from pydantic_ai import Agent, BinaryContent
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -36,10 +38,12 @@ from .prompts import (
 from .schemas import (
     AnchorSet,
     BackgroundPlan,
+    BBox,
     CandidateScore,
     Character,
     CharacterState,
     CharacterTimeline,
+    CharacterVisibility,
     ContinuationDecision,
     ContinuationMode,
     FrameVisibility,
@@ -49,54 +53,48 @@ from .schemas import (
     Prop,
     PropState,
     PropTimeline,
+    PropVisibility,
     Shot,
     Story,
 )
 
 T = TypeVar("T", bound=BaseModel)
-_GRAY_FALLBACK_SIZE = 1024
+_GRAY = (128, 128, 128)
+_FALLBACK_SIZE = 1024
 
 
 class ImagePipeline(Protocol):
     def __call__(
-        self,
-        *,
-        prompt: str,
-        image: list,
-        num_inference_steps: int,
-        true_cfg_scale: float,
-        guidance_scale: float,
-        negative_prompt: str,
-        generator,
+        self, *, prompt: str, image: list, num_inference_steps: int,
+        true_cfg_scale: float, guidance_scale: float, negative_prompt: str, generator,
     ): ...
+
+
+# --- Model + agent caching -------------------------------------------------
 
 
 @lru_cache(maxsize=8)
 def _model_cached(model: str, base_url: str, api_key: str) -> OpenAIChatModel:
-    return OpenAIChatModel(
-        model, provider=OpenAIProvider(base_url=base_url, api_key=api_key)
-    )
-
-
-def _model(settings: Settings) -> OpenAIChatModel:
-    return _model_cached(settings.model, settings.base_url, settings.api_key)
+    return OpenAIChatModel(model, provider=OpenAIProvider(base_url=base_url, api_key=api_key))
 
 
 @lru_cache(maxsize=16)
 def _agent_cached(
     model: str, base_url: str, api_key: str, output_type: type, instructions: str
 ) -> Agent:
-    return Agent(
-        _model_cached(model, base_url, api_key),
-        output_type=output_type,
-        instructions=instructions,
-    )
+    return Agent(_model_cached(model, base_url, api_key), output_type=output_type, instructions=instructions)
 
 
 def _agent_for(output_type: type[T], instructions: str, settings: Settings) -> Agent:
-    return _agent_cached(
-        settings.model, settings.base_url, settings.api_key, output_type, instructions
-    )
+    return _agent_cached(settings.model, settings.base_url, settings.api_key, output_type, instructions)
+
+
+async def _llm(output_type: type[T], instructions: str, prompt, settings: Settings) -> T:
+    """Run a typed pydantic-ai call. `prompt` is a string or list of parts."""
+    return (await _agent_for(output_type, instructions, settings).run(prompt)).output
+
+
+# --- Formatting helpers ------------------------------------------------------
 
 
 def _numbered(items: list[str], prefix: str = "") -> str:
@@ -107,11 +105,33 @@ def _pad(values: list, n: int, default) -> list:
     return values if len(values) == n else [default] * n
 
 
-async def _run_planner_async(
-    output_type: type[T], instructions: str, user_prompt: str, settings: Settings
-) -> T:
-    agent = _agent_for(output_type, instructions, settings)
-    return (await agent.run(user_prompt)).output
+def _format_states(states: dict[str, str]) -> str:
+    return ", ".join(f"{k}={v}" for k, v in states.items()) or "(none)"
+
+
+def _format_prop_states_with_carriers(states: dict[str, str], carriers: dict[str, str]) -> str:
+    if not states:
+        return "(none)"
+    return ", ".join(
+        f"{pid}={state}" + (f" (carried by {carriers[pid]})" if pid in carriers else "")
+        for pid, state in states.items()
+    )
+
+
+def _format_background_plan(bp: BackgroundPlan | None) -> str:
+    if bp is None:
+        return "(no background plan)"
+    parts = [
+        f"{label}={value}"
+        for label, value in (
+            ("must_appear", bp.must_appear),
+            ("must_not_appear", bp.must_not_appear),
+            ("persistent_bg_props", bp.background_props),
+            ("carried_props", bp.carried_props),
+        )
+        if value
+    ]
+    return "; ".join(parts) or "(no constraints)"
 
 
 # --- Planner sub-agents (async) ---------------------------------------------
@@ -124,36 +144,32 @@ async def _cluster_locations(story: Story, settings: Settings) -> LocationCluste
         + f"\n\nKnown locations (hints): {[l.name for l in story.locations] or 'none'}\n"
         f"Return shot_location as a list aligned with the {len(story.shots)} shots above."
     )
-    c = await _run_planner_async(LocationClustering, LOCATION_CLUSTERING, user, settings)
+    c = await _llm(LocationClustering, LOCATION_CLUSTERING, user, settings)
     c.shot_location = _pad(c.shot_location, len(story.shots), "loc-0")
     return c
 
 
-async def _plan_character(
-    char: Character, shots: list[str], settings: Settings
-) -> CharacterTimeline:
+async def _plan_character(char: Character, shots: list[str], settings: Settings) -> list[str]:
     user = (
         f"Character: {char.name}\nDescription: {char.description}\n\n"
         f"Shots:\n{_numbered(shots)}\n\n"
         f"Return appearance_by_shot as a list of length {len(shots)}."
     )
-    tl = await _run_planner_async(CharacterTimeline, CHARACTER_PLANNING, user, settings)
-    tl.character_id = char.id
-    tl.appearance_by_shot = _pad(tl.appearance_by_shot, len(shots), CharacterState.default)
-    return tl
+    tl = await _llm(CharacterTimeline, CHARACTER_PLANNING, user, settings)
+    return _pad(tl.appearance_by_shot, len(shots), CharacterState.default)
 
 
-async def _plan_prop(prop: Prop, shots: list[str], settings: Settings) -> PropTimeline:
+async def _plan_prop(prop: Prop, shots: list[str], settings: Settings) -> tuple[list[str], list[str | None]]:
     user = (
         f"Prop: {prop.name}\nDescription: {prop.description}\n\n"
         f"Shots:\n{_numbered(shots)}\n\n"
         f"Return state_by_shot and carrier_by_shot, each of length {len(shots)}."
     )
-    tl = await _run_planner_async(PropTimeline, PROP_PLANNING, user, settings)
-    tl.prop_id = prop.id
-    tl.state_by_shot = _pad(tl.state_by_shot, len(shots), PropState.not_visible)
-    tl.carrier_by_shot = _pad(tl.carrier_by_shot, len(shots), None)
-    return tl
+    tl = await _llm(PropTimeline, PROP_PLANNING, user, settings)
+    return (
+        _pad(tl.state_by_shot, len(shots), PropState.not_visible),
+        _pad(tl.carrier_by_shot, len(shots), None),
+    )
 
 
 async def _decide_continuation(
@@ -164,29 +180,24 @@ async def _decide_continuation(
         f"Current shot: {curr_desc}\nCurrent location: {curr_loc}\n\n"
         "Decide continuation_mode."
     )
-    decision = await _run_planner_async(
-        ContinuationDecision, CONTINUATION_DECISION, user, settings
-    )
-    return decision.continuation_mode
+    return (await _llm(ContinuationDecision, CONTINUATION_DECISION, user, settings)).continuation_mode
 
 
-async def _plan_background(
-    shot_index: int,
-    shot_description: str,
-    shot_metadata: dict,
-    prop_history: list[dict],
-    settings: Settings,
-) -> BackgroundPlan:
+async def _plan_background(shot: Shot, prop_history: list[dict], settings: Settings) -> BackgroundPlan:
     user = (
         BACKGROUND_PLANNING.format(
-            shot_description=shot_description,
-            shot_metadata=shot_metadata,
+            shot_description=shot.description,
+            shot_metadata={
+                "characters": shot.character_states,
+                "location": shot.location_id,
+                "props": shot.prop_states,
+            },
             prop_history=prop_history or "(none)",
         )
-        + f"\n\nReturn a BackgroundPlan for shot index {shot_index}."
+        + f"\n\nReturn a BackgroundPlan for shot index {shot.index}."
     )
-    bp = await _run_planner_async(BackgroundPlan, BACKGROUND_PLANNING, user, settings)
-    bp.shot_index = shot_index
+    bp = await _llm(BackgroundPlan, BACKGROUND_PLANNING, user, settings)
+    bp.shot_index = shot.index
     return bp
 
 
@@ -197,75 +208,50 @@ async def plan_async(story: Story, settings: Settings) -> Plan:
     """Global Planner Agent (§3.1) = Tables 20 + 22 + 23 + 24 + 21, gathered."""
     cluster = await _cluster_locations(story, settings)
 
-    char_task = asyncio.gather(
-        *(_plan_character(c, story.shots, settings) for c in story.characters)
-    )
-    prop_task = asyncio.gather(*(_plan_prop(p, story.shots, settings) for p in story.props))
-    continuation_task = asyncio.gather(
-        *(
+    char_results, prop_results, raw_continuations = await asyncio.gather(
+        asyncio.gather(*(_plan_character(c, story.shots, settings) for c in story.characters)),
+        asyncio.gather(*(_plan_prop(p, story.shots, settings) for p in story.props)),
+        asyncio.gather(*(
             _decide_continuation(
-                prev_desc=story.shots[t - 1],
-                curr_desc=story.shots[t],
-                prev_loc=cluster.shot_location[t - 1],
-                curr_loc=cluster.shot_location[t],
+                prev_desc=story.shots[t - 1], curr_desc=story.shots[t],
+                prev_loc=cluster.shot_location[t - 1], curr_loc=cluster.shot_location[t],
                 settings=settings,
             )
             for t in range(1, len(story.shots))
-        )
-    )
-    char_results, prop_results, raw_continuations = await asyncio.gather(
-        char_task, prop_task, continuation_task
+        )),
     )
 
-    char_timelines = {tl.character_id: tl.appearance_by_shot for tl in char_results}
-    prop_timelines = {tl.prop_id: tl.state_by_shot for tl in prop_results}
-    prop_carriers = {tl.prop_id: tl.carrier_by_shot for tl in prop_results}
+    char_timelines = dict(zip([c.id for c in story.characters], char_results))
+    prop_timelines = dict(zip([p.id for p in story.props], (s for s, _ in prop_results)))
+    prop_carriers = dict(zip([p.id for p in story.props], (c for _, c in prop_results)))
 
     continuations: list[ContinuationMode] = [ContinuationMode.fresh_location]
-    seen_locations: set[str] = {cluster.shot_location[0]}
+    seen: set[str] = {cluster.shot_location[0]}
     for t, mode in enumerate(raw_continuations, start=1):
-        if mode is ContinuationMode.location_reappearance and cluster.shot_location[t] not in seen_locations:
+        if mode is ContinuationMode.location_reappearance and cluster.shot_location[t] not in seen:
             mode = ContinuationMode.fresh_location
         continuations.append(mode)
-        seen_locations.add(cluster.shot_location[t])
+        seen.add(cluster.shot_location[t])
 
     shots = [
         Shot(
-            index=i,
-            description=desc,
-            location_id=cluster.shot_location[i],
+            index=i, description=desc, location_id=cluster.shot_location[i],
             continuation_mode=continuations[i],
             character_states={cid: tl[i] for cid, tl in char_timelines.items()},
             prop_states={pid: tl[i] for pid, tl in prop_timelines.items()},
-            prop_carriers={
-                pid: carriers[i]
-                for pid, carriers in prop_carriers.items()
-                if carriers[i]
-            },
+            prop_carriers={pid: c[i] for pid, c in prop_carriers.items() if c[i]},
         )
         for i, desc in enumerate(story.shots)
     ]
 
-    background_plans = await asyncio.gather(
-        *(
-            _plan_background(
-                shot_index=s.index,
-                shot_description=s.description,
-                shot_metadata={
-                    "characters": s.character_states,
-                    "location": s.location_id,
-                    "props": s.prop_states,
-                },
-                prop_history=[
-                    {"shot": prev.index, "props": prev.prop_states}
-                    for prev in shots[: s.index]
-                    if prev.prop_states
-                ],
-                settings=settings,
-            )
-            for s in shots
+    background_plans = await asyncio.gather(*(
+        _plan_background(
+            s,
+            [{"shot": prev.index, "props": prev.prop_states} for prev in shots[: s.index] if prev.prop_states],
+            settings,
         )
-    )
+        for s in shots
+    ))
 
     known = {l.id for l in story.locations}
     extra_locs = [
@@ -273,16 +259,14 @@ async def plan_async(story: Story, settings: Settings) -> Plan:
         for lid in set(cluster.shot_location) - known
     ]
     return Plan(
-        shots=shots,
-        characters=story.characters,
+        shots=shots, characters=story.characters,
         locations=[*story.locations, *extra_locs],
-        props=story.props,
-        background_plans=list(background_plans),
+        props=story.props, background_plans=list(background_plans),
     )
 
 
 def plan(story: Story, settings: Settings) -> Plan:
-    """Synchronous wrapper for `plan_async`."""
+    """Synchronous wrapper for `plan_async` (CLI convenience)."""
     return asyncio.run(plan_async(story, settings))
 
 
@@ -296,43 +280,36 @@ def _collect_refs(states: dict[str, str], getter, skip: set[str]) -> list[str]:
         if state in skip:
             continue
         anchor = getter(entity_id, state)
-        if anchor is None:
+        if anchor is None or str(anchor) in seen:
             continue
-        s = str(anchor)
-        if s in seen:
-            continue
-        refs.append(s)
-        seen.add(s)
+        refs.append(str(anchor))
+        seen.add(str(anchor))
     return refs
 
 
-def _character_anchor(
-    memory: Memory, char_id: str, current_state: str, prev_state: str | None
-) -> Path | None:
-    """Algorithm 2 §4: appearance change → canonical first; else → recent first."""
-    canonical = memory.get_character_canonical(char_id, current_state)
-    recent = memory.characters.get((char_id, current_state))
-    if prev_state is None or prev_state != current_state:
-        return canonical or recent
-    return recent or canonical
+def _character_anchor(memory: Memory, cid: str, current: str, prev: str | None) -> Path | None:
+    """Algorithm 2 §4: appearance changed → canonical first; else recent first."""
+    canonical = memory.get_character_canonical(cid, current)
+    recent = memory.characters.get((cid, current))
+    return (canonical or recent) if (prev is None or prev != current) else (recent or canonical)
 
 
 def retrieve(shot: Shot, plan: Plan, memory: Memory) -> AnchorSet:
     prev_shot = plan.shots[shot.index - 1] if shot.index > 0 else None
 
-    def char_getter(cid: str, state: str) -> Path | None:
-        prev_state = prev_shot.character_states.get(cid) if prev_shot else None
-        return _character_anchor(memory, cid, state, prev_state)
-
     char_refs = _collect_refs(
-        shot.character_states, char_getter, {CharacterState.not_present}
+        shot.character_states,
+        lambda cid, st: _character_anchor(
+            memory, cid, st, prev_shot.character_states.get(cid) if prev_shot else None
+        ),
+        {CharacterState.not_present},
     )
     prop_refs = _collect_refs(
         shot.prop_states,
-        lambda pid, state: (
-            memory.get_prop(pid, state)
+        lambda pid, st: (
+            memory.get_prop(pid, st)
             or memory.get_prop(pid, PropState.default)
-            or memory.get_prop_any_state(pid)  # paper §3.2 Alg.2 step 6 — any prior state
+            or memory.get_prop_any_state(pid)
         ),
         {PropState.not_visible, PropState.not_present},
     )
@@ -348,201 +325,138 @@ def retrieve(shot: Shot, plan: Plan, memory: Memory) -> AnchorSet:
     return anchors
 
 
-# --- Image generation (Algorithm 2 step 7 + Table 25) -----------------------
+# --- Anchor extraction primitives ------------------------------------------
 
 
-def _format_states(states: dict[str, str]) -> str:
-    if not states:
-        return "(none)"
-    return ", ".join(f"{k}={v}" for k, v in states.items())
-
-
-def _format_prop_states_with_carriers(
-    states: dict[str, str], carriers: dict[str, str]
-) -> str:
-    if not states:
-        return "(none)"
-    parts = []
-    for pid, state in states.items():
-        carrier = carriers.get(pid)
-        parts.append(f"{pid}={state}" + (f" (carried by {carrier})" if carrier else ""))
-    return ", ".join(parts)
-
-
-def crop_to_anchor(frame_path: Path, bbox, dest: Path) -> Path:
-    """Crop a normalized BBox out of a frame and save to dest."""
-    from PIL import Image
-
-    with Image.open(frame_path) as im:
-        w, h = im.size
-        left = max(0, int(bbox.x * w))
-        top = max(0, int(bbox.y * h))
-        right = min(w, int((bbox.x + bbox.w) * w))
-        bottom = min(h, int((bbox.y + bbox.h) * h))
-        if right <= left or bottom <= top:
-            # Degenerate bbox; fall back to full frame.
-            im.convert("RGB").save(dest)
-        else:
-            im.crop((left, top, right, bottom)).convert("RGB").save(dest)
-    return dest
+def _bbox_pixels(bbox: BBox, size: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    w, h = size
+    left = max(0, int(bbox.x * w))
+    top = max(0, int(bbox.y * h))
+    right = min(w, int((bbox.x + bbox.w) * w))
+    bottom = min(h, int((bbox.y + bbox.h) * h))
+    return (left, top, right, bottom) if right > left and bottom > top else None
 
 
 @lru_cache(maxsize=2)
 def _rembg_session(model_name: str):
     from rembg import new_session
-
     return new_session(model_name)
 
 
-def extract_location_anchor(
-    frame_path: Path,
-    subject_bboxes: list,
-    dest: Path,
-    model_name: str = "birefnet-general",
-    bg_color: tuple[int, int, int] = (128, 128, 128),
-) -> Path:
-    """Background anchor: mask visible subjects out of the frame, neutral-fill.
-
-    Paper Table 28 prescribes "avoid including large foreground characters when
-    possible." For each subject bbox we segment the silhouette inside that
-    region and replace those pixels with neutral gray, preserving background
-    geometry between subjects. With no subject bboxes we save the full frame.
-    """
-    from PIL import Image
+def _segment_rgba(crop: Image.Image, model_name: str) -> Image.Image:
+    """Returns RGBA image with subject pixels opaque, background transparent."""
     from rembg import remove
+    fg = remove(crop.convert("RGB"), session=_rembg_session(model_name), post_process_mask=True)
+    return fg if fg.mode == "RGBA" else fg.convert("RGBA")
 
+
+def crop_to_anchor(frame_path: Path, bbox: BBox, dest: Path) -> Path:
+    """Crop a normalized BBox out of a frame and save to dest."""
+    with Image.open(frame_path) as im:
+        box = _bbox_pixels(bbox, im.size)
+        (im.crop(box) if box else im).convert("RGB").save(dest)
+    return dest
+
+
+def segment_to_anchor(
+    frame_path: Path, bbox: BBox, dest: Path,
+    model_name: str = "birefnet-general", bg_color: tuple[int, int, int] = _GRAY,
+) -> Path:
+    """Bbox-crop, segment subject, composite onto neutral plate.
+
+    Mitigates background-drift when reference images are passed to multi-image
+    edit models: without segmentation, the reference's background pixels
+    condition the generator alongside the subject.
+    """
+    with Image.open(frame_path) as im:
+        box = _bbox_pixels(bbox, im.size)
+        if not box:
+            im.convert("RGB").save(dest)
+            return dest
+        crop = im.crop(box).convert("RGB")
+    fg = _segment_rgba(crop, model_name)
+    plate = Image.new("RGBA", fg.size, (*bg_color, 255))
+    Image.alpha_composite(plate, fg).convert("RGB").save(dest)
+    return dest
+
+
+def extract_location_anchor(
+    frame_path: Path, subject_bboxes: list[BBox], dest: Path,
+    model_name: str = "birefnet-general", bg_color: tuple[int, int, int] = _GRAY,
+) -> Path:
+    """Background anchor: segment-out each subject silhouette, neutral-fill.
+
+    Paper Table 28: "Avoid including large foreground characters when possible."
+    Background geometry between subjects is preserved intact.
+    """
     with Image.open(frame_path) as im:
         out = im.convert("RGBA").copy()
-
     if not subject_bboxes:
         out.convert("RGB").save(dest)
         return dest
 
-    session = _rembg_session(model_name)
-    w, h = out.size
     plate_full = Image.new("RGBA", out.size, (*bg_color, 255))
     for bbox in subject_bboxes:
-        left = max(0, int(bbox.x * w))
-        top = max(0, int(bbox.y * h))
-        right = min(w, int((bbox.x + bbox.w) * w))
-        bottom = min(h, int((bbox.y + bbox.h) * h))
-        if right <= left or bottom <= top:
+        box = _bbox_pixels(bbox, out.size)
+        if not box:
             continue
-        region = out.crop((left, top, right, bottom))
-        fg = remove(region.convert("RGB"), session=session, post_process_mask=True)
-        if fg.mode != "RGBA":
-            fg = fg.convert("RGBA")
-        alpha = fg.split()[-1]
-        plate = plate_full.crop((left, top, right, bottom))
-        masked = Image.composite(plate, region, alpha)
-        out.paste(masked, (left, top))
+        region = out.crop(box)
+        fg = _segment_rgba(region, model_name)
+        plate = plate_full.crop(box)
+        out.paste(Image.composite(plate, region, fg.split()[-1]), box[:2])
 
     out.convert("RGB").save(dest)
     return dest
 
 
-def segment_to_anchor(
-    frame_path: Path,
-    bbox,
-    dest: Path,
-    model_name: str = "birefnet-general",
-    bg_color: tuple[int, int, int] = (128, 128, 128),
-) -> Path:
-    """Bbox-crop a region, then segment subject and composite onto neutral bg.
-
-    Mitigates the background-drift problem when reference images are passed to
-    multi-image edit models (Qwen-Image-Edit-2509 etc.): without segmentation,
-    the reference's background pixels condition the generator alongside the
-    subject, causing the output to inherit the reference's setting.
-    """
-    from PIL import Image
-    from rembg import remove
-
-    with Image.open(frame_path) as im:
-        w, h = im.size
-        left = max(0, int(bbox.x * w))
-        top = max(0, int(bbox.y * h))
-        right = min(w, int((bbox.x + bbox.w) * w))
-        bottom = min(h, int((bbox.y + bbox.h) * h))
-        if right <= left or bottom <= top:
-            im.convert("RGB").save(dest)
-            return dest
-        crop = im.crop((left, top, right, bottom)).convert("RGB")
-
-    session = _rembg_session(model_name)
-    foreground = remove(crop, session=session, post_process_mask=True)
-    if foreground.mode != "RGBA":
-        foreground = foreground.convert("RGBA")
-
-    bg = Image.new("RGBA", foreground.size, (*bg_color, 255))
-    composite = Image.alpha_composite(bg, foreground).convert("RGB")
-    composite.save(dest)
-    return dest
+# --- Image generation (Algorithm 2 step 7 + Table 25) -----------------------
 
 
-def _load_refs(paths: list[str]):
-    from PIL import Image
-
-    imgs = []
+def _load_refs(paths: list[str]) -> list[Image.Image]:
+    imgs: list[Image.Image] = []
     for p in paths:
         with Image.open(p) as im:
             imgs.append(im.convert("RGB"))
     if not imgs:
-        imgs.append(Image.new("RGB", (_GRAY_FALLBACK_SIZE, _GRAY_FALLBACK_SIZE), (128, 128, 128)))
+        imgs.append(Image.new("RGB", (_FALLBACK_SIZE, _FALLBACK_SIZE), _GRAY))
     return imgs
 
 
-def _anchor_labels(anchors: AnchorSet) -> list[str]:
-    return (
+def _anchor_labels(anchors: AnchorSet) -> str:
+    labels = (
         (["previous frame (spatial continuity)"] if anchors.previous_frame else [])
         + ["character anchor"] * len(anchors.character_refs)
         + (["background anchor"] if anchors.location_ref else [])
         + ["prop anchor"] * len(anchors.prop_refs)
     )
-
-
-def _format_background_plan(bp: BackgroundPlan | None) -> str:
-    if bp is None:
-        return "(no background plan)"
-    parts = []
-    if bp.must_appear:
-        parts.append(f"must_appear={bp.must_appear}")
-    if bp.must_not_appear:
-        parts.append(f"must_not_appear={bp.must_not_appear}")
-    if bp.background_props:
-        parts.append(f"persistent_bg_props={bp.background_props}")
-    if bp.carried_props:
-        parts.append(f"carried_props={bp.carried_props}")
-    return "; ".join(parts) or "(no constraints)"
+    return ", ".join(labels) or "(none)"
 
 
 def generate(
-    shot: Shot,
-    anchors: AnchorSet,
-    background_plan: BackgroundPlan | None,
-    settings: Settings,
-    pipeline: ImagePipeline,
-    seed: int,
+    shot: Shot, anchors: AnchorSet, background_plan: BackgroundPlan | None,
+    settings: Settings, pipeline: ImagePipeline, seed: int,
 ) -> list[Path]:
     # lazy: tests stub sys.modules['torch'] before this runs
     import torch
 
     ref_imgs = _load_refs(anchors.ordered_paths())
-    prompt = CANDIDATE_GENERATION.format(
-        shot_description=shot.description,
-        anchor_summary=", ".join(_anchor_labels(anchors)) or "(none)",
-        character_states=_format_states(shot.character_states),
-        prop_states=_format_prop_states_with_carriers(shot.prop_states, shot.prop_carriers),
-        location=shot.location_id or "(unknown)",
-    ) + f"\n\nBackground constraints: {_format_background_plan(background_plan)}"
+    prompt = (
+        CANDIDATE_GENERATION.format(
+            shot_description=shot.description,
+            anchor_summary=_anchor_labels(anchors),
+            character_states=_format_states(shot.character_states),
+            prop_states=_format_prop_states_with_carriers(shot.prop_states, shot.prop_carriers),
+            location=shot.location_id or "(unknown)",
+        )
+        + f"\n\nBackground constraints: {_format_background_plan(background_plan)}"
+    )
     out_dir = settings.out_dir / "candidates" / f"shot_{shot.index:04d}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     paths: list[Path] = []
     for i in range(settings.k_candidates):
         result = pipeline(
-            prompt=prompt,
-            image=ref_imgs,
+            prompt=prompt, image=ref_imgs,
             num_inference_steps=settings.num_inference_steps,
             true_cfg_scale=settings.true_cfg_scale,
             guidance_scale=settings.guidance_scale,
@@ -558,21 +472,9 @@ def generate(
 # --- QA-based selection (Algorithm 3 + Table 26) ----------------------------
 
 
-async def _score_candidate(
-    agent: Agent, parts: list, index: int
-) -> CandidateScore:
-    s = (await agent.run(parts)).output
-    s.candidate_index = index
-    return s
-
-
 async def select_async(
-    candidates: list[Path],
-    shot: Shot,
-    memory: Memory,
-    settings: Settings,
+    candidates: list[Path], shot: Shot, memory: Memory, settings: Settings,
 ) -> tuple[Path, list[CandidateScore]]:
-    agent = _agent_for(CandidateScore, JUDGE_SCORING, settings)
     judge_prompt = JUDGE_SCORING.format(
         shot_description=shot.description,
         character_states=_format_states(shot.character_states),
@@ -580,118 +482,64 @@ async def select_async(
         location=shot.location_id or "(unknown)",
     )
     prev_frame = memory.get_frame(shot.index - 1)
-    prev_part = (
-        ["Previous frame:", BinaryContent.from_path(prev_frame)] if prev_frame else []
-    )
+    prev_part = ["Previous frame:", BinaryContent.from_path(prev_frame)] if prev_frame else []
 
-    tasks = [
-        _score_candidate(
-            agent,
-            [
-                judge_prompt,
-                f"Candidate index: {i}",
-                BinaryContent.from_path(cand),
-                *prev_part,
-            ],
-            i,
+    async def _score(i: int, cand: Path) -> CandidateScore:
+        s = await _llm(
+            CandidateScore, JUDGE_SCORING,
+            [judge_prompt, f"Candidate index: {i}", BinaryContent.from_path(cand), *prev_part],
+            settings,
         )
-        for i, cand in enumerate(candidates)
-    ]
-    scores = await asyncio.gather(*tasks)
+        s.candidate_index = i
+        return s
+
+    scores = list(await asyncio.gather(*(_score(i, c) for i, c in enumerate(candidates))))
     best = max(scores, key=lambda s: s.overall_score)
-    return candidates[best.candidate_index], list(scores)
+    return candidates[best.candidate_index], scores
 
 
-def select(
-    candidates: list[Path],
-    shot: Shot,
-    memory: Memory,
-    settings: Settings,
-) -> tuple[Path, list[CandidateScore]]:
-    """Synchronous wrapper for `select_async`."""
-    return asyncio.run(select_async(candidates, shot, memory, settings))
+# --- Algorithm 4 — VLM visibility extraction (Tables 27, 28, 29) -----------
 
 
-# --- Algorithm 4 — VLM visibility gating (Tables 27, 28, 29) ----------------
-
-from .schemas import CharacterVisibility, PropVisibility
-
-
-class _CharVisibilityResp(BaseModel):
+class _CharVisResp(BaseModel):
     characters: list[CharacterVisibility]
 
 
-class _PropVisibilityResp(BaseModel):
+class _PropVisResp(BaseModel):
     props: list[PropVisibility]
 
 
-class _LocVisibilityResp(BaseModel):
+class _LocVisResp(BaseModel):
     visible: bool
 
 
-async def _vlm_check(
-    response_type: type[T], instructions: str, frame: Path, settings: Settings
-) -> T:
-    agent = _agent_for(response_type, instructions, settings)
-    res = await agent.run(["Inspect the frame.", BinaryContent.from_path(frame)])
-    return res.output
-
-
-async def _check_characters_visible(
-    shot: Shot, frame: Path, settings: Settings
-) -> list[CharacterVisibility]:
-    expected = {
-        cid: state
-        for cid, state in shot.character_states.items()
-        if state != CharacterState.not_present
-    }
+async def _check_chars(shot: Shot, frame: Path, settings: Settings) -> list[CharacterVisibility]:
+    expected = {cid: st for cid, st in shot.character_states.items() if st != CharacterState.not_present}
     if not expected:
         return []
-    instructions = CHAR_VISIBILITY.format(
-        shot_description=shot.description, expected_characters=expected
-    )
-    return (await _vlm_check(_CharVisibilityResp, instructions, frame, settings)).characters
+    instr = CHAR_VISIBILITY.format(shot_description=shot.description, expected_characters=expected)
+    return (await _llm(_CharVisResp, instr, ["Inspect the frame.", BinaryContent.from_path(frame)], settings)).characters
 
 
-async def _check_props_visible(
-    shot: Shot, frame: Path, settings: Settings
-) -> list[PropVisibility]:
-    expected = {
-        pid: state
-        for pid, state in shot.prop_states.items()
-        if state not in {PropState.not_visible, PropState.not_present}
-    }
+async def _check_props(shot: Shot, frame: Path, settings: Settings) -> list[PropVisibility]:
+    expected = {pid: st for pid, st in shot.prop_states.items() if st not in {PropState.not_visible, PropState.not_present}}
     if not expected:
         return []
-    instructions = PROP_VISIBILITY.format(
-        shot_description=shot.description, expected_props=expected
-    )
-    return (await _vlm_check(_PropVisibilityResp, instructions, frame, settings)).props
+    instr = PROP_VISIBILITY.format(shot_description=shot.description, expected_props=expected)
+    return (await _llm(_PropVisResp, instr, ["Inspect the frame.", BinaryContent.from_path(frame)], settings)).props
 
 
-async def _check_location_visible(shot: Shot, frame: Path, settings: Settings) -> bool:
+async def _check_location(shot: Shot, frame: Path, settings: Settings) -> bool:
     if not shot.location_id:
         return False
-    instructions = BG_VISIBILITY.format(
-        shot_description=shot.description, location=shot.location_id
-    )
-    return (await _vlm_check(_LocVisibilityResp, instructions, frame, settings)).visible
+    instr = BG_VISIBILITY.format(shot_description=shot.description, location=shot.location_id)
+    return (await _llm(_LocVisResp, instr, ["Inspect the frame.", BinaryContent.from_path(frame)], settings)).visible
 
 
-async def extract_visibility_async(
-    shot: Shot, chosen: Path, settings: Settings
-) -> FrameVisibility:
+async def extract_visibility_async(shot: Shot, chosen: Path, settings: Settings) -> FrameVisibility:
     chars, location_ok, props = await asyncio.gather(
-        _check_characters_visible(shot, chosen, settings),
-        _check_location_visible(shot, chosen, settings),
-        _check_props_visible(shot, chosen, settings),
+        _check_chars(shot, chosen, settings),
+        _check_location(shot, chosen, settings),
+        _check_props(shot, chosen, settings),
     )
-    return FrameVisibility(
-        characters=chars, location_visible=location_ok, props=props
-    )
-
-
-def extract_visibility(
-    shot: Shot, chosen: Path, settings: Settings
-) -> FrameVisibility:
-    return asyncio.run(extract_visibility_async(shot, chosen, settings))
+    return FrameVisibility(characters=chars, location_visible=location_ok, props=props)

@@ -46,5 +46,9 @@ def plan_only(story_path: Path = typer.Argument(..., exists=True, readable=True)
     typer.echo(plan_agent(_load_story(story_path), Settings()).model_dump_json(indent=2))
 
 
-if __name__ == "__main__":
+def main() -> None:
     app()
+
+
+if __name__ == "__main__":
+    main()
