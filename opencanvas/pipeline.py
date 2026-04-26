@@ -13,6 +13,7 @@ from pydantic import TypeAdapter
 from .agents import (
     ImagePipeline,
     crop_to_anchor,
+    extract_location_anchor,
     extract_visibility_async,
     generate,
     plan_async,
@@ -202,7 +203,19 @@ def _update_anchors_from_frame(
         memory.set_character(cid, state, anchor)
 
     if shot.location_id and visibility.location_visible:
-        memory.set_location(shot.location_id, chosen)
+        if settings.enable_segmentation:
+            subject_bboxes = [
+                cv.bbox for cv in visibility.characters if cv.visible and cv.bbox
+            ] + [pv.bbox for pv in visibility.props if pv.visible and pv.bbox]
+            loc_dest = crop_dir / f"loc__{shot.location_id}.png"
+            anchor = extract_location_anchor(
+                chosen, subject_bboxes, loc_dest,
+                model_name=settings.segment_model,
+                bg_color=settings.segment_bg_color,
+            )
+        else:
+            anchor = chosen
+        memory.set_location(shot.location_id, anchor)
 
     for pid, state in shot.prop_states.items():
         if state in {PropState.not_visible, PropState.not_present}:

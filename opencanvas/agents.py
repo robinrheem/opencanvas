@@ -394,6 +394,53 @@ def _rembg_session(model_name: str):
     return new_session(model_name)
 
 
+def extract_location_anchor(
+    frame_path: Path,
+    subject_bboxes: list,
+    dest: Path,
+    model_name: str = "birefnet-general",
+    bg_color: tuple[int, int, int] = (128, 128, 128),
+) -> Path:
+    """Background anchor: mask visible subjects out of the frame, neutral-fill.
+
+    Paper Table 28 prescribes "avoid including large foreground characters when
+    possible." For each subject bbox we segment the silhouette inside that
+    region and replace those pixels with neutral gray, preserving background
+    geometry between subjects. With no subject bboxes we save the full frame.
+    """
+    from PIL import Image
+    from rembg import remove
+
+    with Image.open(frame_path) as im:
+        out = im.convert("RGBA").copy()
+
+    if not subject_bboxes:
+        out.convert("RGB").save(dest)
+        return dest
+
+    session = _rembg_session(model_name)
+    w, h = out.size
+    plate_full = Image.new("RGBA", out.size, (*bg_color, 255))
+    for bbox in subject_bboxes:
+        left = max(0, int(bbox.x * w))
+        top = max(0, int(bbox.y * h))
+        right = min(w, int((bbox.x + bbox.w) * w))
+        bottom = min(h, int((bbox.y + bbox.h) * h))
+        if right <= left or bottom <= top:
+            continue
+        region = out.crop((left, top, right, bottom))
+        fg = remove(region.convert("RGB"), session=session, post_process_mask=True)
+        if fg.mode != "RGBA":
+            fg = fg.convert("RGBA")
+        alpha = fg.split()[-1]
+        plate = plate_full.crop((left, top, right, bottom))
+        masked = Image.composite(plate, region, alpha)
+        out.paste(masked, (left, top))
+
+    out.convert("RGB").save(dest)
+    return dest
+
+
 def segment_to_anchor(
     frame_path: Path,
     bbox,

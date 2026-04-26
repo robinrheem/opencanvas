@@ -117,6 +117,56 @@ def test_segment_to_anchor_composites_subject_on_neutral_bg(tmp_path: Path, monk
         assert out.getpixel((50, 50)) == (255, 0, 0)
 
 
+def test_extract_location_anchor_masks_subject_bboxes(tmp_path: Path, monkeypatch):
+    """Subjects' silhouettes inside their bboxes get neutral-filled; bg stays."""
+    import opencanvas.agents as agents_mod
+    from opencanvas.agents import extract_location_anchor
+
+    def _fake_remove(crop, session=None, post_process_mask=False):
+        # Pretend the entire region is foreground (alpha=255 everywhere).
+        w, h = crop.size
+        return Image.new("RGBA", (w, h), (255, 0, 0, 255))
+
+    monkeypatch.setattr(agents_mod, "_rembg_session", lambda model_name: None)
+    monkeypatch.setattr("rembg.remove", _fake_remove)
+
+    src = tmp_path / "frame.png"
+    Image.new("RGB", (100, 100), color=(200, 200, 200)).save(src)
+    dest = tmp_path / "loc.png"
+
+    extract_location_anchor(
+        src,
+        [BBox(x=0.0, y=0.0, w=0.5, h=0.5)],
+        dest,
+        model_name="ignored",
+        bg_color=(50, 60, 70),
+    )
+
+    with Image.open(dest) as out:
+        # Inside bbox: subject silhouette (whole region fg) replaced with bg_color
+        assert out.getpixel((10, 10)) == (50, 60, 70)
+        # Outside bbox: original frame preserved
+        assert out.getpixel((90, 90)) == (200, 200, 200)
+
+
+def test_extract_location_anchor_no_subjects_returns_full_frame(tmp_path: Path, monkeypatch):
+    import opencanvas.agents as agents_mod
+    from opencanvas.agents import extract_location_anchor
+
+    monkeypatch.setattr(agents_mod, "_rembg_session", lambda model_name: None)
+    monkeypatch.setattr("rembg.remove", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no subjects")))
+
+    src = tmp_path / "frame.png"
+    Image.new("RGB", (100, 100), color=(10, 20, 30)).save(src)
+    dest = tmp_path / "loc.png"
+
+    extract_location_anchor(src, [], dest, model_name="ignored")
+
+    with Image.open(dest) as out:
+        assert out.size == (100, 100)
+        assert out.getpixel((50, 50)) == (10, 20, 30)
+
+
 def test_segment_to_anchor_degenerate_bbox_falls_back(tmp_path: Path, monkeypatch):
     """Degenerate bbox short-circuits before rembg is touched."""
     import opencanvas.agents as agents_mod
