@@ -368,7 +368,7 @@ def crop_to_anchor(frame_path: Path, bbox: BBox, dest: Path) -> Path:
 
 def segment_to_anchor(
     frame_path: Path, bbox: BBox, dest: Path,
-    model_name: str = "birefnet-general", bg_color: tuple[int, int, int] = _GRAY,
+    model_name: str, bg_color: tuple[int, int, int] = _GRAY,
 ) -> Path:
     """Bbox-crop, segment subject, composite onto neutral plate.
 
@@ -390,7 +390,7 @@ def segment_to_anchor(
 
 def extract_location_anchor(
     frame_path: Path, subject_bboxes: list[BBox], dest: Path,
-    model_name: str = "birefnet-general", bg_color: tuple[int, int, int] = _GRAY,
+    model_name: str, bg_color: tuple[int, int, int] = _GRAY,
 ) -> Path:
     """Background anchor: segment-out each subject silhouette, neutral-fill.
 

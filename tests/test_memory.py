@@ -1,17 +1,10 @@
 from pathlib import Path
 
-from PIL import Image
-
 from opencanvas.memory import Memory
 
 
-def _img(path: Path) -> Path:
-    Image.new("RGB", (4, 4), color=(1, 2, 3)).save(path)
-    return path
-
-
-def test_memory_roundtrip(tmp_path: Path):
-    src = _img(tmp_path / "src.png")
+def test_memory_roundtrip(tmp_path: Path, make_image):
+    src = make_image(name="src.png", color=(1, 2, 3), size=4)
     m = Memory.empty(tmp_path / "mem")
     m.add_character("char-ada", "default", src)
     m.add_location("loc-warehouse", src)

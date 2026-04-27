@@ -7,15 +7,35 @@ from PIL import Image
 from opencanvas.agents import (
     _format_prop_states_with_carriers,
     crop_to_anchor,
+    extract_location_anchor,
+    segment_to_anchor,
 )
 from opencanvas.memory import Memory
 from opencanvas.schemas import BBox
 
 
-def test_crop_to_anchor_resizes(tmp_path: Path):
-    src = tmp_path / "frame.png"
-    Image.new("RGB", (100, 100), color=(0, 0, 0)).save(src)
-    dest = tmp_path / "char_crop.png"
+def _half_opaque_red(crop, session=None, post_process_mask=False):
+    """Centre 50% opaque red, rest transparent."""
+    w, h = crop.size
+    out = Image.new("RGBA", (w, h), (255, 0, 0, 0))
+    for x in range(w // 4, (3 * w) // 4):
+        for y in range(h // 4, (3 * h) // 4):
+            out.putpixel((x, y), (255, 0, 0, 255))
+    return out
+
+
+def _all_opaque_red(crop, session=None, post_process_mask=False):
+    """Whole region opaque foreground."""
+    return Image.new("RGBA", crop.size, (255, 0, 0, 255))
+
+
+def _must_not_call(*a, **kw):
+    raise AssertionError("rembg.remove should not be called")
+
+
+def test_crop_to_anchor_resizes(make_image):
+    src = make_image(size=100)
+    dest = src.parent / "char_crop.png"
 
     crop_to_anchor(src, BBox(x=0.25, y=0.25, w=0.5, h=0.5), dest)
 
@@ -23,10 +43,9 @@ def test_crop_to_anchor_resizes(tmp_path: Path):
         assert out.size == (50, 50)
 
 
-def test_crop_to_anchor_clamps_bbox(tmp_path: Path):
-    src = tmp_path / "frame.png"
-    Image.new("RGB", (100, 100), color=(0, 0, 0)).save(src)
-    dest = tmp_path / "edge_crop.png"
+def test_crop_to_anchor_clamps_bbox(make_image):
+    src = make_image(size=100)
+    dest = src.parent / "edge_crop.png"
 
     crop_to_anchor(src, BBox(x=0.9, y=0.9, w=0.5, h=0.5), dest)
 
@@ -35,10 +54,9 @@ def test_crop_to_anchor_clamps_bbox(tmp_path: Path):
         assert out.size == (10, 10)
 
 
-def test_crop_to_anchor_degenerate_falls_back_to_full(tmp_path: Path):
-    src = tmp_path / "frame.png"
-    Image.new("RGB", (100, 100), color=(50, 50, 50)).save(src)
-    dest = tmp_path / "fallback.png"
+def test_crop_to_anchor_degenerate_falls_back_to_full(make_image):
+    src = make_image(color=(50, 50, 50))
+    dest = src.parent / "fallback.png"
 
     crop_to_anchor(src, BBox(x=1.0, y=1.0, w=0.01, h=0.01), dest)
 
@@ -46,9 +64,8 @@ def test_crop_to_anchor_degenerate_falls_back_to_full(tmp_path: Path):
         assert out.size == (100, 100)
 
 
-def test_prop_any_state_returns_most_recent(tmp_path: Path):
-    src = tmp_path / "src.png"
-    Image.new("RGB", (4, 4)).save(src)
+def test_prop_any_state_returns_most_recent(tmp_path: Path, make_image):
+    src = make_image(name="src.png", size=4)
     m = Memory.empty(tmp_path / "mem")
     m.add_prop("prop-journal", "intact", src)
     m.add_prop("prop-journal", "burned", src)
@@ -71,94 +88,54 @@ def test_format_prop_states_with_carriers():
         {"prop-journal": "char-ada"},
     )
     assert "prop-journal=carried (carried by char-ada)" in s
-    assert "prop-key=intact" in s
-    assert "(carried by" not in s.split("prop-key=intact")[1] if "prop-key=intact" in s else True
+    # prop-key has no carrier — must NOT show "(carried by ...)"
+    after_key = s.split("prop-key=intact")[1]
+    assert "(carried by" not in after_key
 
 
 def test_format_prop_states_empty():
     assert _format_prop_states_with_carriers({}, {}) == "(none)"
 
 
-def test_segment_to_anchor_composites_subject_on_neutral_bg(tmp_path: Path, monkeypatch):
-    """rembg returns RGBA with alpha mask; segment_to_anchor composites onto bg_color."""
-    import opencanvas.agents as agents_mod
-    from opencanvas.agents import segment_to_anchor
-
-    def _fake_remove(crop, session=None, post_process_mask=False):
-        # Pretend rembg kept the centre 50% as foreground, made the rest transparent.
-        w, h = crop.size
-        out = Image.new("RGBA", (w, h), (255, 0, 0, 0))  # transparent red
-        cx0, cy0 = w // 4, h // 4
-        cx1, cy1 = (3 * w) // 4, (3 * h) // 4
-        for x in range(cx0, cx1):
-            for y in range(cy0, cy1):
-                out.putpixel((x, y), (255, 0, 0, 255))  # opaque red
-        return out
-
-    monkeypatch.setattr(agents_mod, "_rembg_session", lambda model_name: None)
-    monkeypatch.setattr("rembg.remove", _fake_remove)
-
-    src = tmp_path / "frame.png"
-    Image.new("RGB", (100, 100), color=(0, 0, 0)).save(src)
-    dest = tmp_path / "anchor.png"
+def test_segment_to_anchor_composites_subject_on_neutral_bg(make_image, mock_rembg):
+    mock_rembg(_half_opaque_red)
+    src = make_image(color=(0, 0, 0))
+    dest = src.parent / "anchor.png"
 
     segment_to_anchor(
-        src,
-        BBox(x=0.0, y=0.0, w=1.0, h=1.0),
-        dest,
-        model_name="ignored",
-        bg_color=(50, 60, 70),
+        src, BBox(x=0.0, y=0.0, w=1.0, h=1.0), dest,
+        model_name="ignored", bg_color=(50, 60, 70),
     )
 
     with Image.open(dest) as out:
-        # Top-left pixel was transparent in the mock → reveals neutral bg
+        # Top-left was transparent in the mock → reveals neutral bg
         assert out.getpixel((1, 1)) == (50, 60, 70)
-        # Centre pixel was opaque red → preserved
+        # Centre was opaque red → preserved
         assert out.getpixel((50, 50)) == (255, 0, 0)
 
 
-def test_extract_location_anchor_masks_subject_bboxes(tmp_path: Path, monkeypatch):
+def test_extract_location_anchor_masks_subject_bboxes(make_image, mock_rembg):
     """Subjects' silhouettes inside their bboxes get neutral-filled; bg stays."""
-    import opencanvas.agents as agents_mod
-    from opencanvas.agents import extract_location_anchor
-
-    def _fake_remove(crop, session=None, post_process_mask=False):
-        # Pretend the entire region is foreground (alpha=255 everywhere).
-        w, h = crop.size
-        return Image.new("RGBA", (w, h), (255, 0, 0, 255))
-
-    monkeypatch.setattr(agents_mod, "_rembg_session", lambda model_name: None)
-    monkeypatch.setattr("rembg.remove", _fake_remove)
-
-    src = tmp_path / "frame.png"
-    Image.new("RGB", (100, 100), color=(200, 200, 200)).save(src)
-    dest = tmp_path / "loc.png"
+    mock_rembg(_all_opaque_red)
+    src = make_image(color=(200, 200, 200))
+    dest = src.parent / "loc.png"
 
     extract_location_anchor(
-        src,
-        [BBox(x=0.0, y=0.0, w=0.5, h=0.5)],
-        dest,
-        model_name="ignored",
-        bg_color=(50, 60, 70),
+        src, [BBox(x=0.0, y=0.0, w=0.5, h=0.5)], dest,
+        model_name="ignored", bg_color=(50, 60, 70),
     )
 
     with Image.open(dest) as out:
-        # Inside bbox: subject silhouette (whole region fg) replaced with bg_color
+        # Inside bbox: subject silhouette replaced with bg_color
         assert out.getpixel((10, 10)) == (50, 60, 70)
         # Outside bbox: original frame preserved
         assert out.getpixel((90, 90)) == (200, 200, 200)
 
 
-def test_extract_location_anchor_no_subjects_returns_full_frame(tmp_path: Path, monkeypatch):
-    import opencanvas.agents as agents_mod
-    from opencanvas.agents import extract_location_anchor
-
-    monkeypatch.setattr(agents_mod, "_rembg_session", lambda model_name: None)
-    monkeypatch.setattr("rembg.remove", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no subjects")))
-
-    src = tmp_path / "frame.png"
-    Image.new("RGB", (100, 100), color=(10, 20, 30)).save(src)
-    dest = tmp_path / "loc.png"
+def test_extract_location_anchor_no_subjects_returns_full_frame(make_image, mock_rembg):
+    mock_rembg(_must_not_call)
+    src = make_image(color=(10, 20, 30))
+    dest = src.parent / "loc.png"
 
     extract_location_anchor(src, [], dest, model_name="ignored")
 
@@ -167,28 +144,13 @@ def test_extract_location_anchor_no_subjects_returns_full_frame(tmp_path: Path, 
         assert out.getpixel((50, 50)) == (10, 20, 30)
 
 
-def test_segment_to_anchor_degenerate_bbox_falls_back(tmp_path: Path, monkeypatch):
+def test_segment_to_anchor_degenerate_bbox_falls_back(make_image, mock_rembg):
     """Degenerate bbox short-circuits before rembg is touched."""
-    import opencanvas.agents as agents_mod
-    from opencanvas.agents import segment_to_anchor
+    mock_rembg(_must_not_call)
+    src = make_image(color=(10, 20, 30))
+    dest = src.parent / "anchor.png"
 
-    called = {"n": 0}
+    segment_to_anchor(src, BBox(x=1.0, y=1.0, w=0.01, h=0.01), dest, model_name="ignored")
 
-    def _fake_remove(*a, **kw):
-        called["n"] += 1
-        raise RuntimeError("must not be called")
-
-    monkeypatch.setattr(agents_mod, "_rembg_session", lambda model_name: None)
-    monkeypatch.setattr("rembg.remove", _fake_remove)
-
-    src = tmp_path / "frame.png"
-    Image.new("RGB", (100, 100), color=(10, 20, 30)).save(src)
-    dest = tmp_path / "anchor.png"
-
-    segment_to_anchor(
-        src, BBox(x=1.0, y=1.0, w=0.01, h=0.01), dest, model_name="ignored"
-    )
-
-    assert called["n"] == 0
     with Image.open(dest) as out:
         assert out.size == (100, 100)

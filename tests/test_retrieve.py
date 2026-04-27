@@ -1,7 +1,5 @@
 from pathlib import Path
 
-from PIL import Image
-
 from opencanvas.agents import retrieve
 from opencanvas.memory import Memory
 from opencanvas.schemas import (
@@ -11,11 +9,6 @@ from opencanvas.schemas import (
     Plan,
     Shot,
 )
-
-
-def _img(path: Path) -> Path:
-    Image.new("RGB", (4, 4), color=(1, 2, 3)).save(path)
-    return path
 
 
 def _make_plan(shots: list[Shot]) -> Plan:
@@ -44,9 +37,9 @@ def _shot(
     )
 
 
-def test_fresh_location_returns_char_only(tmp_path: Path):
+def test_fresh_location_returns_char_only(tmp_path: Path, make_image):
     m = Memory.empty(tmp_path / "mem")
-    src = _img(tmp_path / "a.png")
+    src = make_image(name="a.png", color=(1, 2, 3), size=4)
     m.add_character("char-ada", "default", src)
     shot = _shot(0, "loc-a", ContinuationMode.fresh_location)
     anchors = retrieve(shot, _make_plan([shot]), m)
@@ -56,9 +49,9 @@ def test_fresh_location_returns_char_only(tmp_path: Path):
     assert anchors.previous_frame is None
 
 
-def test_previous_frame_continuation_uses_prev_frame(tmp_path: Path):
+def test_previous_frame_continuation_uses_prev_frame(tmp_path: Path, make_image):
     m = Memory.empty(tmp_path / "mem")
-    src = _img(tmp_path / "a.png")
+    src = make_image(name="a.png", color=(1, 2, 3), size=4)
     m.add_character("char-ada", "default", src)
     m.add_frame(0, src)
     s0 = _shot(0, "loc-a", ContinuationMode.fresh_location)
@@ -70,9 +63,9 @@ def test_previous_frame_continuation_uses_prev_frame(tmp_path: Path):
     assert len(anchors.character_refs) == 1
 
 
-def test_location_reappearance_uses_bg_anchor(tmp_path: Path):
+def test_location_reappearance_uses_bg_anchor(tmp_path: Path, make_image):
     m = Memory.empty(tmp_path / "mem")
-    src = _img(tmp_path / "a.png")
+    src = make_image(name="a.png", color=(1, 2, 3), size=4)
     m.add_character("char-ada", "default", src)
     m.add_location("loc-a", src)
     shots = [
@@ -87,9 +80,9 @@ def test_location_reappearance_uses_bg_anchor(tmp_path: Path):
     assert len(anchors.character_refs) == 1
 
 
-def test_prop_anchor_included_when_visible(tmp_path: Path):
+def test_prop_anchor_included_when_visible(tmp_path: Path, make_image):
     m = Memory.empty(tmp_path / "mem")
-    src = _img(tmp_path / "a.png")
+    src = make_image(name="a.png", color=(1, 2, 3), size=4)
     m.add_character("char-ada", "default", src)
     m.add_prop("prop-journal", "intact", src)
     shot = _shot(0, "loc-a", ContinuationMode.fresh_location, props={"prop-journal": "intact"})
@@ -97,9 +90,9 @@ def test_prop_anchor_included_when_visible(tmp_path: Path):
     assert len(anchors.prop_refs) == 1
 
 
-def test_prop_anchor_skipped_when_not_visible(tmp_path: Path):
+def test_prop_anchor_skipped_when_not_visible(tmp_path: Path, make_image):
     m = Memory.empty(tmp_path / "mem")
-    src = _img(tmp_path / "a.png")
+    src = make_image(name="a.png", color=(1, 2, 3), size=4)
     m.add_character("char-ada", "default", src)
     m.add_prop("prop-journal", "intact", src)
     shot = _shot(0, "loc-a", ContinuationMode.fresh_location, props={"prop-journal": "not_visible"})
@@ -107,10 +100,10 @@ def test_prop_anchor_skipped_when_not_visible(tmp_path: Path):
     assert anchors.prop_refs == []
 
 
-def test_canonical_used_when_appearance_changes(tmp_path: Path):
+def test_canonical_used_when_appearance_changes(tmp_path: Path, make_image):
     """Algorithm 2: appearance_state changed across shots → prefer canonical anchor."""
     m = Memory.empty(tmp_path / "mem")
-    src = _img(tmp_path / "tuxedo.png")
+    src = make_image(name="tuxedo.png", color=(1, 2, 3), size=4)
     m.add_canonical("char-ada", "tuxedo", src)
     m.add_character("char-ada", "tuxedo", src)
 
@@ -122,9 +115,9 @@ def test_canonical_used_when_appearance_changes(tmp_path: Path):
     assert "characters_canonical" in anchors.character_refs[0]
 
 
-def test_recent_used_when_state_unchanged(tmp_path: Path):
+def test_recent_used_when_state_unchanged(tmp_path: Path, make_image):
     m = Memory.empty(tmp_path / "mem")
-    src = _img(tmp_path / "tuxedo.png")
+    src = make_image(name="tuxedo.png", color=(1, 2, 3), size=4)
     m.add_canonical("char-ada", "tuxedo", src)
     m.add_character("char-ada", "tuxedo", src)
 

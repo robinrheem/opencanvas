@@ -64,7 +64,7 @@ def _seed_canonical_anchors(story: Story, memory: Memory) -> None:
         if not c.reference_image:
             continue
         try:
-            memory.add_canonical(c.id, "default", Path(c.reference_image))
+            memory.add_canonical(c.id, CharacterState.default, Path(c.reference_image))
         except FileNotFoundError:
             continue
 

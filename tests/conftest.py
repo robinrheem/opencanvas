@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Callable
 
 import pytest
 from PIL import Image
-from pydantic_ai.models.test import TestModel
-
 from pydantic_ai import Agent
+from pydantic_ai.models.test import TestModel
 
 import opencanvas.agents as agents_mod
 
@@ -18,7 +18,7 @@ class _FakeResult:
 
 
 class FakeImagePipeline:
-    """Records call kwargs; returns a 1-image result colored from the seed."""
+    """Records call kwargs; returns one image colored from the seed."""
 
     def __init__(self):
         self.calls: list[dict] = []
@@ -70,3 +70,22 @@ def tmp_image(tmp_path: Path) -> Path:
     p = tmp_path / "img.png"
     Image.new("RGB", (16, 16), color=(10, 20, 30)).save(p)
     return p
+
+
+@pytest.fixture
+def make_image(tmp_path: Path) -> Callable[..., Path]:
+    """Factory: writes a PNG into tmp_path and returns its path."""
+    def _make(name: str = "frame.png", color: tuple = (0, 0, 0), size: int = 100) -> Path:
+        p = tmp_path / name
+        Image.new("RGB", (size, size), color=color).save(p)
+        return p
+    return _make
+
+
+@pytest.fixture
+def mock_rembg(monkeypatch) -> Callable[[Callable], None]:
+    """Factory: install a fake `rembg.remove` and stub `_rembg_session`."""
+    def _install(fake_remove: Callable) -> None:
+        monkeypatch.setattr(agents_mod, "_rembg_session", lambda model_name: None)
+        monkeypatch.setattr("rembg.remove", fake_remove)
+    return _install
