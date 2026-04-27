@@ -103,9 +103,18 @@ class Memory:
 
     # --- Smart lookups (logic beyond plain dict.get) ---
 
-    def character(self, cid: str, state: str) -> Path | None:
-        """Recent state anchor; canonical fallback. (Algorithm 2.)"""
-        return self.characters.get((cid, state)) or self.characters_canonical.get((cid, state))
+    def character(self, cid: str, state: str, prev_state: str | None = None) -> Path | None:
+        """Algorithm 2 §4 character anchor lookup.
+
+        - prev_state unknown (None) or unchanged → recent first, canonical fallback.
+        - prev_state changed → canonical first (refreshes identity for new appearance),
+          recent fallback.
+        """
+        canonical = self.characters_canonical.get((cid, state))
+        recent = self.characters.get((cid, state))
+        if prev_state is not None and prev_state != state:
+            return canonical or recent
+        return recent or canonical
 
     def prop(self, pid: str, state: str) -> Path | None:
         """State match → 'default' state → any prior state of this prop."""

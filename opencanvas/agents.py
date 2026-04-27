@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from functools import lru_cache
 from pathlib import Path
-from typing import Protocol, TypeVar
+from typing import Callable, Protocol, TypeVar
 
 from PIL import Image
 from pydantic import BaseModel
@@ -89,8 +89,14 @@ def _agent_for(output_type: type[T], instructions: str, settings: Settings) -> A
     return _agent_cached(settings.model, settings.base_url, settings.api_key, output_type, instructions)
 
 
-async def _llm(output_type: type[T], instructions: str, prompt, settings: Settings) -> T:
-    """Run a typed pydantic-ai call. `prompt` is a string or list of parts."""
+async def _llm(
+    output_type: type[T],
+    instructions: str,
+    prompt: str | list,
+    settings: Settings,
+) -> T:
+    """Run a typed pydantic-ai call. `prompt` is a string or a list of parts
+    mixing strings and BinaryContent for multimodal calls."""
     return (await _agent_for(output_type, instructions, settings).run(prompt)).output
 
 
@@ -149,10 +155,24 @@ async def _cluster_locations(story: Story, settings: Settings) -> LocationCluste
     return c
 
 
+def _states_hint(declared: list[str], label: str) -> str:
+    """Author-declared vocabulary hint for sub-planners.
+
+    Empty / single 'default' list → no hint (paper-faithful prompt).
+    Non-empty author declaration → constrain LLM to known names where applicable
+    (mitigates hallucinated state-name variants in OSS LLMs).
+    """
+    meaningful = [s for s in declared if s != "default"]
+    if not meaningful:
+        return ""
+    return f"\nPrefer one of these {label} when applicable: {meaningful}."
+
+
 async def _plan_character(char: Character, shots: list[str], settings: Settings) -> list[str]:
     user = (
-        f"Character: {char.name}\nDescription: {char.description}\n\n"
-        f"Shots:\n{_numbered(shots)}\n\n"
+        f"Character: {char.name}\nDescription: {char.description}"
+        + _states_hint(char.appearance_states, "appearance state names")
+        + f"\n\nShots:\n{_numbered(shots)}\n\n"
         f"Return appearance_by_shot as a list of length {len(shots)}."
     )
     tl = await _llm(CharacterTimeline, CHARACTER_PLANNING, user, settings)
@@ -161,8 +181,9 @@ async def _plan_character(char: Character, shots: list[str], settings: Settings)
 
 async def _plan_prop(prop: Prop, shots: list[str], settings: Settings) -> tuple[list[str], list[str | None]]:
     user = (
-        f"Prop: {prop.name}\nDescription: {prop.description}\n\n"
-        f"Shots:\n{_numbered(shots)}\n\n"
+        f"Prop: {prop.name}\nDescription: {prop.description}"
+        + _states_hint(prop.states, "state names")
+        + f"\n\nShots:\n{_numbered(shots)}\n\n"
         f"Return state_by_shot and carrier_by_shot, each of length {len(shots)}."
     )
     tl = await _llm(PropTimeline, PROP_PLANNING, user, settings)
@@ -221,9 +242,9 @@ async def plan(story: Story, settings: Settings) -> Plan:
         )),
     )
 
-    char_timelines = dict(zip([c.id for c in story.characters], char_results))
-    prop_timelines = dict(zip([p.id for p in story.props], (s for s, _ in prop_results)))
-    prop_carriers = dict(zip([p.id for p in story.props], (c for _, c in prop_results)))
+    char_timelines = {c.id: tl for c, tl in zip(story.characters, char_results)}
+    prop_timelines = {p.id: states for p, (states, _) in zip(story.props, prop_results)}
+    prop_carriers = {p.id: carriers for p, (_, carriers) in zip(story.props, prop_results)}
 
     continuations: list[ContinuationMode] = [ContinuationMode.fresh_location]
     seen: set[str] = {cluster.shot_location[0]}
@@ -273,13 +294,16 @@ def plan_sync(story: Story, settings: Settings) -> Plan:
 # --- Anchor retrieval (Algorithm 2) -----------------------------------------
 
 
-def _collect_refs(states: dict[str, str], getter, skip: set[str]) -> list[str]:
+_AnchorLookup = Callable[[str, str], "Path | None"]
+
+
+def _collect_refs(states: dict[str, str], lookup: _AnchorLookup, skip: set[str]) -> list[str]:
     refs: list[str] = []
     seen: set[str] = set()
     for entity_id, state in states.items():
         if state in skip:
             continue
-        anchor = getter(entity_id, state)
+        anchor = lookup(entity_id, state)
         if anchor is None or str(anchor) in seen:
             continue
         refs.append(str(anchor))
@@ -290,16 +314,11 @@ def _collect_refs(states: dict[str, str], getter, skip: set[str]) -> list[str]:
 def retrieve(shot: Shot, plan: Plan, memory: Memory) -> AnchorSet:
     prev_shot = plan.shots[shot.index - 1] if shot.index > 0 else None
 
-    def char_anchor(cid: str, state: str) -> Path | None:
-        """Algorithm 2 §4: appearance changed → canonical first; else recent first."""
+    def char_lookup(cid: str, state: str) -> Path | None:
         prev_state = prev_shot.character_states.get(cid) if prev_shot else None
-        canonical = memory.characters_canonical.get((cid, state))
-        recent = memory.characters.get((cid, state))
-        if prev_state is None or prev_state != state:
-            return canonical or recent
-        return recent or canonical
+        return memory.character(cid, state, prev_state)
 
-    char_refs = _collect_refs(shot.character_states, char_anchor, {CharacterState.not_present})
+    char_refs = _collect_refs(shot.character_states, char_lookup, {CharacterState.not_present})
     prop_refs = _collect_refs(
         shot.prop_states, memory.prop, {PropState.not_visible, PropState.not_present}
     )

@@ -26,6 +26,7 @@ from .memory import Memory
 from .schemas import (
     AnchorSet,
     BackgroundPlan,
+    BBox,
     CandidateScore,
     CharacterState,
     FrameVisibility,
@@ -103,7 +104,9 @@ def _subject_anchor(chosen: Path, bbox, dest: Path, settings: Settings) -> Path:
 
 
 def _refresh_subject_anchors(
-    chosen: Path, visibility_items: list, expected_states: dict[str, str],
+    chosen: Path,
+    visibility_items: list[tuple[str, bool, BBox | None]],
+    expected_states: dict[str, str],
     skip_states: set[str], add_anchor: Callable[[str, str, Path], Path],
     file_prefix: str, crop_dir: Path, settings: Settings,
 ) -> None:

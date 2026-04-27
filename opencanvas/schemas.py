@@ -87,7 +87,6 @@ class ContinuationDecision(BaseModel):
     """Output of Table 24 — anchor mode for the current shot."""
 
     continuation_mode: ContinuationMode
-    reasoning: str = ""
 
 
 class BackgroundPlan(BaseModel):
