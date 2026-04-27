@@ -54,7 +54,7 @@ def _load_image_pipeline(settings: Settings) -> ImagePipeline:
 
     pipe = QwenImageEditPlusPipeline.from_pretrained(
         settings.image_model, torch_dtype=torch.bfloat16
-    ).to("cuda")
+    ).to(settings.device)
     pipe.set_progress_bar_config(disable=True)
     return pipe
 

@@ -469,7 +469,7 @@ def generate(
             true_cfg_scale=settings.true_cfg_scale,
             guidance_scale=settings.guidance_scale,
             negative_prompt=" ",
-            generator=torch.Generator(device="cuda").manual_seed(seed + i),
+            generator=torch.Generator(device=settings.device).manual_seed(seed + i),
         )
         p = out_dir / f"cand_{i}.png"
         result.images[0].save(p)

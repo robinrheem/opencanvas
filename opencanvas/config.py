@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     model: str = "gemma4:31b"
 
     image_model: str = "Qwen/Qwen-Image-Edit-2509"
+    device: str = "cuda"  # e.g. "cuda", "cuda:0", "cuda:1", "cpu"
     k_candidates: int = 4
     num_inference_steps: int = 40
     true_cfg_scale: float = 4.0

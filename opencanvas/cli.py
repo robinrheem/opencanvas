@@ -29,11 +29,14 @@ def run(
     k_candidates: int | None = typer.Option(None, "--k", help="Candidates per shot."),
     model: str | None = typer.Option(None, "--model", help="Override LLM model."),
     seed: int | None = typer.Option(None, "--seed", help="Base seed."),
+    device: str | None = typer.Option(
+        None, "--device", help="Torch device for diffusers + segmentation, e.g. cuda:1."
+    ),
 ) -> None:
     """Generate a storyboard for STORY_PATH."""
     story = _load_story(story_path)
     settings = _overridden(
-        out_dir=out_dir, k_candidates=k_candidates, model=model, seed=seed
+        out_dir=out_dir, k_candidates=k_candidates, model=model, seed=seed, device=device,
     )
     plan, results = run_sync(story, settings)
     typer.echo(f"Plan: {len(plan.characters)} characters, {len(plan.locations)} locations")
