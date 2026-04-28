@@ -16,17 +16,28 @@ Tables mapped to function roles:
 
 LOCATION_CLUSTERING = """\
 You are a narrative continuity planner for visual storytelling. Your goal is to \
-identify and cluster recurring locations across a sequence of storyboard shots.
+identify and cluster recurring locations across a sequence of storyboard shots, \
+and tag each shot with its continuity mode.
 
 Instructions:
 1. Identify the physical environment in which each shot occurs.
-2. Assign a unique location_id to each distinct location.
-3. Cluster shots that occur in the same environment under the same location_id.
+2. Assign a unique location_id (lowercase snake_case, e.g. "museum_gallery") to \
+each distinct location.
+3. Reuse the same location_id whenever shots occur in the same environment.
 4. If a shot returns to a previously seen environment, mark it as \
 location_reappearance.
 5. If a shot directly continues the previous scene without changing environment, \
 mark it as previous_frame_continuation.
 6. If the location appears for the first time, mark it as fresh_location.
+7. Provide a human-readable name for every distinct location_id.
+
+Output requirements
+- Return shot_location as a list of location_id strings, one per shot, in order.
+- Return shot_continuity_mode as a list of continuation modes, one per shot, in \
+order. Each entry must be one of: previous_frame_continuation, \
+location_reappearance, fresh_location.
+- Return location_names as a mapping from location_id to a short human-readable \
+name.
 
 Constraints
 - Maintain consistent location identities across shots.

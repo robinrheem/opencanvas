@@ -62,10 +62,25 @@ class Shot(BaseModel):
 
 
 class LocationClustering(BaseModel):
-    """Output of Table 20 — location_id per shot + name lookup."""
+    """Output of Table 20 — per-shot location_id, continuity mode, and name lookup.
+
+    Paper's Table 20 emits a `continuity_mode` per shot during the clustering
+    pass; Table 24 (ContinuationDecision) is invoked separately for per-shot
+    refinement. Both signals exist intentionally in the paper: clustering gives
+    bulk context, Table 24 gives precise per-shot judgment.
+    """
 
     shot_location: list[str] = Field(
         description="location_id for each shot in order (length == num shots)."
+    )
+    shot_continuity_mode: list[ContinuationMode] = Field(
+        default_factory=list,
+        description=(
+            "continuity_mode for each shot in order (length == num shots). "
+            "fresh_location = first time the environment appears. "
+            "location_reappearance = returns to a previously-seen location after a gap. "
+            "previous_frame_continuation = directly continues the immediately previous shot."
+        ),
     )
     location_names: dict[str, str] = Field(default_factory=dict)
 

@@ -17,7 +17,7 @@ from typing import Callable, Protocol, TypeVar
 
 from PIL import Image
 from pydantic import BaseModel
-from pydantic_ai import Agent, BinaryContent
+from pydantic_ai import Agent, BinaryContent, NativeOutput
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -82,7 +82,14 @@ def _model_cached(model: str, base_url: str, api_key: str) -> OpenAIChatModel:
 def _agent_cached(
     model: str, base_url: str, api_key: str, output_type: type, instructions: str
 ) -> Agent:
-    return Agent(_model_cached(model, base_url, api_key), output_type=output_type, instructions=instructions)
+    # NativeOutput forces response_format=json_schema (constrained decoding via vLLM/xgrammar)
+    # instead of tool calling. Avoids needing --tool-call-parser on the server and works on
+    # any backend that supports OpenAI's structured outputs.
+    return Agent(
+        _model_cached(model, base_url, api_key),
+        output_type=NativeOutput(output_type),
+        instructions=instructions,
+    )
 
 
 def _agent_for(output_type: type[T], instructions: str, settings: Settings) -> Agent:
@@ -148,10 +155,13 @@ async def _cluster_locations(story: Story, settings: Settings) -> LocationCluste
         f"Title: {story.title}\n\nShots:\n"
         + _numbered(story.shots, prefix="Scene_1_Shot_").replace(". ", ": ", 1)
         + f"\n\nKnown locations (hints): {[l.name for l in story.locations] or 'none'}\n"
-        f"Return shot_location as a list aligned with the {len(story.shots)} shots above."
+        f"Return shot_location and shot_continuity_mode as lists of length {len(story.shots)}."
     )
     c = await _llm(LocationClustering, LOCATION_CLUSTERING, user, settings)
     c.shot_location = _pad(c.shot_location, len(story.shots), "loc-0")
+    c.shot_continuity_mode = _pad(
+        c.shot_continuity_mode, len(story.shots), ContinuationMode.fresh_location
+    )
     return c
 
 
