@@ -157,11 +157,13 @@ def _refresh_anchors(
         memory.add_prop, memory.has_prop, "prop", crop_dir, settings,
     )
 
-    if (
-        shot.location_id
-        and visibility.location_visible
-        and not memory.has_location(shot.location_id)
-    ):
+    # Location anchor: save once per location_id, regardless of VLM "visible" verdict.
+    # Gemma 4 31B frequently returns visible=False on establishing shots that clearly
+    # show the location, leaving locations/ empty. Without a saved anchor, later
+    # location_reappearance shots (including arrivals demoted by refine_prev_frame_anchor)
+    # have no spatial cue and collapse to portrait crops of the character anchors.
+    # The freeze guarantees no drift across re-saves.
+    if shot.location_id and not memory.has_location(shot.location_id):
         if settings.enable_segmentation:
             subject_bboxes = [
                 cv.bbox for cv in visibility.characters if cv.visible and cv.bbox
