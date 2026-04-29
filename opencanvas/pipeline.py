@@ -108,13 +108,22 @@ def _refresh_subject_anchors(
     chosen: Path,
     visibility_items: list[tuple[str, bool, BBox | None]],
     expected_states: dict[str, str],
-    skip_states: set[str], add_anchor: Callable[[str, str, Path], Path],
+    skip_states: set[str],
+    add_anchor: Callable[[str, str, Path], Path],
+    has_anchor: Callable[[str, str], bool],
     file_prefix: str, crop_dir: Path, settings: Settings,
 ) -> None:
-    """Refresh memory anchors for chars or props (same shape, differs only by add_anchor)."""
+    """Refresh memory anchors for chars or props (same shape, differs only by add_anchor).
+
+    Anchors are FROZEN after the first write per (entity_id, state). Re-saving
+    the same state every shot accumulates generative drift (each subsequent
+    chosen frame deviates slightly from the prior; using the latest as the new
+    anchor compounds the deviation). When state truly changes, the new
+    (entity_id, new_state) key is unwritten so a fresh anchor is captured.
+    """
     by_id = {v[0]: v for v in visibility_items}  # id -> (id, visible, bbox)
     for entity_id, state in expected_states.items():
-        if state in skip_states:
+        if state in skip_states or has_anchor(entity_id, state):
             continue
         item = by_id.get(entity_id)
         if visibility_items and (item is None or not item[1]):
@@ -139,16 +148,20 @@ def _refresh_anchors(
         chosen,
         [(cv.character_id, cv.visible, cv.bbox) for cv in visibility.characters],
         shot.character_states, {CharacterState.not_present},
-        memory.add_character, "char", crop_dir, settings,
+        memory.add_character, memory.has_character, "char", crop_dir, settings,
     )
     _refresh_subject_anchors(
         chosen,
         [(pv.prop_id, pv.visible, pv.bbox) for pv in visibility.props],
         shot.prop_states, {PropState.not_visible, PropState.not_present},
-        memory.add_prop, "prop", crop_dir, settings,
+        memory.add_prop, memory.has_prop, "prop", crop_dir, settings,
     )
 
-    if shot.location_id and visibility.location_visible:
+    if (
+        shot.location_id
+        and visibility.location_visible
+        and not memory.has_location(shot.location_id)
+    ):
         if settings.enable_segmentation:
             subject_bboxes = [
                 cv.bbox for cv in visibility.characters if cv.visible and cv.bbox

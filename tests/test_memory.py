@@ -32,6 +32,21 @@ def test_safe_filename_collapses_unsafe_chars():
     assert safe_filename("///") == "_"  # all-stripped fallback
 
 
+def test_has_predicates(tmp_path: Path, make_image):
+    src = make_image(name="x.png", size=4)
+    m = Memory.empty(tmp_path / "mem")
+    assert not m.has_character("c1", "default")
+    assert not m.has_prop("p1", "default")
+    assert not m.has_location("loc-a")
+    m.add_character("c1", "default", src)
+    m.add_prop("p1", "default", src)
+    m.add_location("loc-a", src)
+    assert m.has_character("c1", "default")
+    assert not m.has_character("c1", "tuxedo")  # different state = different key
+    assert m.has_prop("p1", "default")
+    assert m.has_location("loc-a")
+
+
 def test_add_prop_with_unsafe_state(tmp_path: Path, make_image):
     """Regression: LLM emits state names like '3/4_full'; must not break path joins."""
     src = make_image(name="src.png", size=4)

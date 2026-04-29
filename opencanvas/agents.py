@@ -445,11 +445,26 @@ def refine_prev_frame_anchor(
 
 
 def _bbox_pixels(bbox: BBox, size: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    """Convert a BBox to pixel coords, auto-detecting pixel vs normalized.
+
+    Gemma 4 31B (and other OSS VLMs) emit bboxes in pixel coords sometimes and
+    normalized [0,1] other times — even within the same run. If we always
+    multiply by frame size, pixel emissions blow past the frame and get clamped
+    to None, silently skipping masking and producing full-frame "subject"
+    crops. Threshold 1.5 keeps slightly-out-of-range normalized values
+    (observed up to ~1.0–1.4) on the normalized path while catching real pixel
+    coords (typically 100s).
+    """
     w, h = size
-    left = max(0, int(bbox.x * w))
-    top = max(0, int(bbox.y * h))
-    right = min(w, int((bbox.x + bbox.w) * w))
-    bottom = min(h, int((bbox.y + bbox.h) * h))
+    looks_pixels = max(bbox.x, bbox.y, bbox.w, bbox.h) > 1.5
+    if looks_pixels:
+        x, y, bw, bh = bbox.x, bbox.y, bbox.w, bbox.h
+    else:
+        x, y, bw, bh = bbox.x * w, bbox.y * h, bbox.w * w, bbox.h * h
+    left = max(0, int(x))
+    top = max(0, int(y))
+    right = min(w, int(x + bw))
+    bottom = min(h, int(y + bh))
     return (left, top, right, bottom) if right > left and bottom > top else None
 
 

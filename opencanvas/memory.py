@@ -128,6 +128,17 @@ class Memory:
     def set_frame_bboxes(self, idx: int, bboxes: dict[str, BBox]) -> None:
         self.frame_char_bboxes[idx] = bboxes
 
+    # --- Existence checks (used to freeze anchors after first write) -----
+
+    def has_character(self, cid: str, state: str) -> bool:
+        return (cid, state) in self.characters
+
+    def has_prop(self, pid: str, state: str) -> bool:
+        return (pid, state) in self.props
+
+    def has_location(self, lid: str) -> bool:
+        return lid in self.locations
+
     # --- Smart lookups (logic beyond plain dict.get) ---
 
     def character(self, cid: str, state: str, prev_state: str | None = None) -> Path | None:
