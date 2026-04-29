@@ -135,12 +135,19 @@ class BackgroundPlan(BaseModel):
 
 
 class BBox(BaseModel):
-    """Normalized bounding box in [0, 1] frame coordinates."""
+    """Normalized bounding box; nominally in [0, 1] frame coordinates.
 
-    x: float = Field(ge=0.0, le=1.0)
-    y: float = Field(ge=0.0, le=1.0)
-    w: float = Field(gt=0.0, le=1.0)
-    h: float = Field(gt=0.0, le=1.0)
+    Bounds are NOT enforced because OSS VLMs (Gemma 4 31B, others) sometimes
+    emit pixel coords or out-of-range values. `_bbox_pixels` in agents.py
+    clamps pixels into the actual frame size, so out-of-range fractions
+    degrade gracefully into the nearest valid crop. Strict bounds caused
+    pydantic-ai validation retry storms and full-pipeline aborts in practice.
+    """
+
+    x: float
+    y: float
+    w: float
+    h: float
 
 
 class CharacterVisibility(BaseModel):
