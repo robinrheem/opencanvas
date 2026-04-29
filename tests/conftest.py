@@ -86,6 +86,6 @@ def make_image(tmp_path: Path) -> Callable[..., Path]:
 def mock_rembg(monkeypatch) -> Callable[[Callable], None]:
     """Factory: install a fake `rembg.remove` and stub `_rembg_session`."""
     def _install(fake_remove: Callable) -> None:
-        monkeypatch.setattr(agents_mod, "_rembg_session", lambda model_name: None)
+        monkeypatch.setattr(agents_mod, "_rembg_session", lambda *a, **kw: None)
         monkeypatch.setattr("rembg.remove", fake_remove)
     return _install

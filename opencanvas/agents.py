@@ -410,10 +410,34 @@ def _bbox_pixels(bbox: BBox, size: tuple[int, int]) -> tuple[int, int, int, int]
     return (left, top, right, bottom) if right > left and bottom > top else None
 
 
-@lru_cache(maxsize=2)
-def _rembg_session(model_name: str):
+def _device_id(device: str) -> int:
+    """Parse 'cuda:N' / 'cuda' / 'cpu' → GPU index N (default 0; -1 for CPU)."""
+    if device == "cpu":
+        return -1
+    if ":" in device:
+        return int(device.rsplit(":", 1)[-1])
+    return 0
+
+
+@lru_cache(maxsize=4)
+def _rembg_session(model_name: str, device: str = "cuda"):
+    """Pin BiRefNet ORT session to the same GPU as diffusers.
+
+    Default ORT picks GPU 0 which may be saturated by an external vLLM
+    server (canvas_v11 hit OOM allocating 822MB on GPU 0 with only 7GB free
+    while GPU 5 had 97GB free). Match settings.device so segmentation runs
+    where there's headroom.
+    """
     from rembg import new_session
-    return new_session(model_name)
+
+    gpu = _device_id(device)
+    if gpu < 0:
+        return new_session(model_name, providers=["CPUExecutionProvider"])
+    providers = [
+        ("CUDAExecutionProvider", {"device_id": gpu}),
+        "CPUExecutionProvider",
+    ]
+    return new_session(model_name, providers=providers)
 
 
 _LAMA_URL = "https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt"
@@ -424,15 +448,13 @@ def _ceil_modulo(x: int, mod: int) -> int:
     return x if x % mod == 0 else (x // mod + 1) * mod
 
 
-@lru_cache(maxsize=1)
-def _lama_model():
+@lru_cache(maxsize=4)
+def _lama_model(device: str = "cuda"):
     """Big-LaMa torchscript model (Apache 2.0, ~200MB).
 
-    Inlined to avoid the simple-lama-inpainting wrapper's stale dep pins
-    (Pillow<10, numpy<2). Used for location anchor inpainting — fills
-    subject silhouettes with coherent background pixels so the image
-    generator sees a clean empty scene, not gray people-shaped plates
-    that imply forced cast count.
+    Pinned to the same GPU as diffusers via `device` arg; 'cuda' alone
+    means default GPU which is risky on multi-GPU boxes where another
+    process owns GPU 0.
     """
     import torch
     from torch.hub import download_url_to_file, get_dir
@@ -442,18 +464,19 @@ def _lama_model():
     if not cache_path.exists():
         download_url_to_file(_LAMA_URL, str(cache_path), progress=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        device = "cpu"
     model = torch.jit.load(str(cache_path), map_location=device)
     model.eval()
     return model, device
 
 
-def _lama_inpaint(image: Image.Image, mask: Image.Image) -> Image.Image:
+def _lama_inpaint(image: Image.Image, mask: Image.Image, device: str = "cuda") -> Image.Image:
     """Run Big-LaMa on (RGB image, L mask). Mask: 0=keep, 255=inpaint."""
     import numpy as np
     import torch
 
-    model, device = _lama_model()
+    model, device = _lama_model(device)
 
     img_np = np.array(image.convert("RGB")).astype(np.float32) / 255.0
     mask_np = (np.array(mask.convert("L")) > 0).astype(np.float32)
@@ -477,10 +500,14 @@ def _lama_inpaint(image: Image.Image, mask: Image.Image) -> Image.Image:
     return Image.fromarray(out_np[:h, :w])  # crop pad off
 
 
-def _segment_rgba(crop: Image.Image, model_name: str) -> Image.Image:
+def _segment_rgba(crop: Image.Image, model_name: str, device: str = "cuda") -> Image.Image:
     """Returns RGBA image with subject pixels opaque, background transparent."""
     from rembg import remove
-    fg = remove(crop.convert("RGB"), session=_rembg_session(model_name), post_process_mask=True)
+    fg = remove(
+        crop.convert("RGB"),
+        session=_rembg_session(model_name, device),
+        post_process_mask=True,
+    )
     return fg if fg.mode == "RGBA" else fg.convert("RGBA")
 
 
@@ -494,6 +521,7 @@ def crop_to_anchor(frame_path: Path, bbox: BBox, dest: Path) -> Path:
 def segment_to_anchor(
     frame_path: Path, bbox: BBox, dest: Path,
     model_name: str, bg_color: tuple[int, int, int] = _GRAY,
+    device: str = "cuda",
 ) -> Path:
     """Bbox-crop, segment subject, composite onto neutral plate.
 
@@ -507,7 +535,7 @@ def segment_to_anchor(
             im.convert("RGB").save(dest)
             return dest
         crop = im.crop(box).convert("RGB")
-    fg = _segment_rgba(crop, model_name)
+    fg = _segment_rgba(crop, model_name, device)
     plate = Image.new("RGBA", fg.size, (*bg_color, 255))
     Image.alpha_composite(plate, fg).convert("RGB").save(dest)
     return dest
@@ -515,7 +543,7 @@ def segment_to_anchor(
 
 def _build_subject_mask(
     frame_size: tuple[int, int], frame_rgba: Image.Image,
-    subject_bboxes: list[BBox], model_name: str,
+    subject_bboxes: list[BBox], model_name: str, device: str = "cuda",
 ) -> Image.Image:
     """Composite a single binary mask covering all subject silhouettes.
 
@@ -529,7 +557,7 @@ def _build_subject_mask(
         if not box:
             continue
         region = frame_rgba.crop(box)
-        fg = _segment_rgba(region, model_name)
+        fg = _segment_rgba(region, model_name, device)
         mask.paste(fg.split()[-1], box[:2])
     return mask
 
@@ -537,7 +565,7 @@ def _build_subject_mask(
 def extract_location_anchor(
     frame_path: Path, subject_bboxes: list[BBox], dest: Path,
     model_name: str, bg_color: tuple[int, int, int] = _GRAY,
-    enable_inpainting: bool = True,
+    enable_inpainting: bool = True, device: str = "cuda",
 ) -> Path:
     """Background anchor: segment-out each subject silhouette, then either
     Big-LaMa inpaint the holes (default) or neutral-fill with bg_color.
@@ -556,11 +584,11 @@ def extract_location_anchor(
         return dest
 
     if enable_inpainting:
-        mask = _build_subject_mask(rgba.size, rgba, subject_bboxes, model_name)
+        mask = _build_subject_mask(rgba.size, rgba, subject_bboxes, model_name, device)
         if mask.getbbox() is None:  # no subject pixels found
             rgba.convert("RGB").save(dest)
             return dest
-        inpainted = _lama_inpaint(rgba.convert("RGB"), mask)
+        inpainted = _lama_inpaint(rgba.convert("RGB"), mask, device)
         inpainted.save(dest)
         return dest
 
@@ -571,7 +599,7 @@ def extract_location_anchor(
         if not box:
             continue
         region = rgba.crop(box)
-        fg = _segment_rgba(region, model_name)
+        fg = _segment_rgba(region, model_name, device)
         plate = plate_full.crop(box)
         rgba.paste(Image.composite(plate, region, fg.split()[-1]), box[:2])
     rgba.convert("RGB").save(dest)

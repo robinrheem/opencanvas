@@ -99,6 +99,7 @@ def _subject_anchor(chosen: Path, bbox, dest: Path, settings: Settings) -> Path:
         return segment_to_anchor(
             chosen, bbox, dest,
             model_name=settings.segment_model, bg_color=settings.segment_bg_color,
+            device=settings.device,
         )
     return crop_to_anchor(chosen, bbox, dest)
 
@@ -156,7 +157,7 @@ def _refresh_anchors(
                 chosen, subject_bboxes,
                 crop_dir / f"loc__{safe_filename(shot.location_id)}.png",
                 model_name=settings.segment_model, bg_color=settings.segment_bg_color,
-                enable_inpainting=settings.enable_inpainting,
+                enable_inpainting=settings.enable_inpainting, device=settings.device,
             )
         else:
             anchor = chosen

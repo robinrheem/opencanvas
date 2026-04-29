@@ -135,7 +135,7 @@ def test_extract_location_anchor_inpaints_subject_bboxes(make_image, mock_rembg,
 
     mock_rembg(_all_opaque_red)
 
-    def fake_lama_inpaint(rgb_image, mask):
+    def fake_lama_inpaint(rgb_image, mask, device="cuda"):
         # Pretend inpainter recolored the masked area to bright blue.
         out = rgb_image.copy()
         blue = Image.new("RGB", out.size, (0, 0, 255))
