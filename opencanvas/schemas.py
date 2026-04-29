@@ -61,6 +61,19 @@ class Shot(BaseModel):
     )
 
 
+class DiscoveredEntities(BaseModel):
+    """Output of the entity discovery step (paper §3.1 'Extract characters,
+    locations, objects → define states (C, L, O)').
+
+    Run BEFORE per-character / per-prop timelines when the input Story does
+    not pre-declare its entities. Locations are discovered by Table 20
+    separately, so this only carries characters + props.
+    """
+
+    characters: list[Character] = Field(default_factory=list)
+    props: list[Prop] = Field(default_factory=list)
+
+
 class LocationClustering(BaseModel):
     """Output of Table 20 — per-shot location_id, continuity mode, and name lookup.
 

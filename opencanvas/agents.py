@@ -30,6 +30,7 @@ from .prompts import (
     CHAR_VISIBILITY,
     CHARACTER_PLANNING,
     CONTINUATION_DECISION,
+    ENTITY_EXTRACTION,
     JUDGE_SCORING,
     LOCATION_CLUSTERING,
     PROP_PLANNING,
@@ -46,6 +47,7 @@ from .schemas import (
     CharacterVisibility,
     ContinuationDecision,
     ContinuationMode,
+    DiscoveredEntities,
     FrameVisibility,
     Location,
     LocationClustering,
@@ -150,6 +152,20 @@ def _format_background_plan(bp: BackgroundPlan | None) -> str:
 # --- Planner sub-agents (async) ---------------------------------------------
 
 
+async def _discover_entities(story: Story, settings: Settings) -> DiscoveredEntities:
+    """Paper §3.1 entity extraction step."""
+    user = (
+        f"Title: {story.title}\n\nShots:\n{_numbered(story.shots)}\n\n"
+        "Return DiscoveredEntities with characters and props."
+    )
+    return await _llm(DiscoveredEntities, ENTITY_EXTRACTION, user, settings)
+
+
+async def _empty_discovery() -> DiscoveredEntities:
+    """No-op when the input Story already declares entities."""
+    return DiscoveredEntities()
+
+
 async def _cluster_locations(story: Story, settings: Settings) -> LocationClustering:
     user = (
         f"Title: {story.title}\n\nShots:\n"
@@ -236,12 +252,32 @@ async def _plan_background(shot: Shot, prop_history: list[dict], settings: Setti
 
 
 async def plan(story: Story, settings: Settings) -> Plan:
-    """Global Planner Agent (§3.1) = Tables 20 + 22 + 23 + 24 + 21, gathered."""
-    cluster = await _cluster_locations(story, settings)
+    """Global Planner Agent (§3.1).
+
+    Steps (all gathered via asyncio.gather where independent):
+      1. Entity discovery (§3.1) — only when the input Story has no declared
+         characters / props. Author-declared entities are trusted as-is.
+      2. Location clustering (Table 20) — independent, runs alongside (1).
+      3. Per-character timelines (Table 22) — depends on (1).
+      4. Per-prop timelines (Table 23) — depends on (1).
+      5. Per-shot continuation decision (Table 24) — depends on (2).
+      6. Per-shot background plan (Table 21) — depends on (1)+(2)+(3)+(4).
+    """
+    needs_discovery = not story.characters and not story.props
+    discovery_task = (
+        _discover_entities(story, settings)
+        if needs_discovery
+        else _empty_discovery()
+    )
+    cluster_task = _cluster_locations(story, settings)
+    discovered, cluster = await asyncio.gather(discovery_task, cluster_task)
+
+    characters = story.characters or discovered.characters
+    props = story.props or discovered.props
 
     char_results, prop_results, raw_continuations = await asyncio.gather(
-        asyncio.gather(*(_plan_character(c, story.shots, settings) for c in story.characters)),
-        asyncio.gather(*(_plan_prop(p, story.shots, settings) for p in story.props)),
+        asyncio.gather(*(_plan_character(c, story.shots, settings) for c in characters)),
+        asyncio.gather(*(_plan_prop(p, story.shots, settings) for p in props)),
         asyncio.gather(*(
             _decide_continuation(
                 prev_desc=story.shots[t - 1], curr_desc=story.shots[t],
@@ -252,15 +288,18 @@ async def plan(story: Story, settings: Settings) -> Plan:
         )),
     )
 
-    char_timelines = {c.id: tl for c, tl in zip(story.characters, char_results)}
-    prop_timelines = {p.id: states for p, (states, _) in zip(story.props, prop_results)}
-    prop_carriers = {p.id: carriers for p, (_, carriers) in zip(story.props, prop_results)}
+    char_timelines = {c.id: tl for c, tl in zip(characters, char_results)}
+    prop_timelines = {p.id: states for p, (states, _) in zip(props, prop_results)}
+    prop_carriers = {p.id: carriers for p, (_, carriers) in zip(props, prop_results)}
 
     continuations: list[ContinuationMode] = [ContinuationMode.fresh_location]
     seen: set[str] = {cluster.shot_location[0]}
     for t, mode in enumerate(raw_continuations, start=1):
+        # Bug 2 fix: two-sided validation against the cluster's seen-location set.
         if mode is ContinuationMode.location_reappearance and cluster.shot_location[t] not in seen:
-            mode = ContinuationMode.fresh_location
+            mode = ContinuationMode.fresh_location  # demote false reappearance
+        elif mode is ContinuationMode.fresh_location and cluster.shot_location[t] in seen:
+            mode = ContinuationMode.location_reappearance  # promote false fresh
         continuations.append(mode)
         seen.add(cluster.shot_location[t])
 
@@ -290,9 +329,9 @@ async def plan(story: Story, settings: Settings) -> Plan:
         for lid in set(cluster.shot_location) - known
     ]
     return Plan(
-        shots=shots, characters=story.characters,
+        shots=shots, characters=characters,
         locations=[*story.locations, *extra_locs],
-        props=story.props, background_plans=list(background_plans),
+        props=props, background_plans=list(background_plans),
     )
 
 

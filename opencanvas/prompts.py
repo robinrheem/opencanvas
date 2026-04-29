@@ -2,6 +2,7 @@
 
 Tables mapped to function roles:
 
+- Entity discovery (paper §3.1)              -> ENTITY_EXTRACTION
 - Table 20: Location Clustering              -> LOCATION_CLUSTERING
 - Table 21: Background / Prop-Geometry Plan  -> BACKGROUND_PLANNING
 - Table 22: Character Appearance Planning    -> CHARACTER_PLANNING
@@ -13,6 +14,42 @@ Tables mapped to function roles:
 - Table 28: Background Anchor Visibility     -> BG_VISIBILITY
 - Table 29: Prop Anchor Visibility           -> PROP_VISIBILITY
 """
+
+
+ENTITY_EXTRACTION = """\
+You are a narrative continuity planner for visual storytelling. Your goal is to \
+identify every recurring entity that appears across a sequence of storyboard \
+shots so that downstream agents can track each one's state and reuse visual \
+anchors.
+
+Instructions:
+1. Read every shot description.
+2. Identify distinct CHARACTERS — people or named beings that appear in any \
+shot. A character is anything you would want to render with a stable face and \
+outfit across shots. Skip background extras only mentioned generically (e.g. \
+"a crowd", "passers-by") unless they are foregrounded.
+3. Identify distinct PROPS — objects whose identity matters across shots, \
+particularly anything that changes state (intact -> broken, present -> taken, \
+sealed -> opened) or that recurs in multiple shots. Skip generic environmental \
+items that don't transition or recur (e.g. "a tablecloth" if it never changes).
+4. For each character, give:
+   - id: stable kebab-case (e.g. "char-elena", "char-bartender")
+   - name: human-readable short name
+   - description: one sentence covering visual identity (face, hair, build, \
+typical wardrobe)
+5. For each prop, give:
+   - id: stable kebab-case (e.g. "prop-journal", "prop-birthday-cake")
+   - name: human-readable short name
+   - description: one sentence covering visual identity (shape, color, material, \
+distinguishing features)
+
+Constraints
+- Prefer fewer canonical entities over many near-duplicates: if two shots \
+mention "the woman" and "Elena" in the same scene, they are one character.
+- Do not invent entities that aren't grounded in the shots.
+- Locations are extracted separately — do not include them here.\
+"""
+
 
 LOCATION_CLUSTERING = """\
 You are a narrative continuity planner for visual storytelling. Your goal is to \
