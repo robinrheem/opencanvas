@@ -391,53 +391,35 @@ def _present_chars(states: dict[str, str]) -> set[str]:
 
 def refine_prev_frame_anchor(
     shot: Shot, plan: Plan, anchors: AnchorSet, memory: Memory, settings: Settings,
-    masked_dir: Path,
+    masked_dir: Path,  # kept for signature stability; unused after departure demote.
 ) -> AnchorSet:
-    """Reconcile cast diff between prev_shot and current shot when
-    previous_frame_continuation is in effect.
+    """Demote previous_frame_continuation to location_reappearance whenever
+    the cast differs between prev_shot and the current shot.
 
-    Image-edit models weight image conditioning over text. If the previous
-    frame's cast doesn't match the current shot, prompt-based "absent" /
-    "present" instructions lose to the visual prior:
-      - Departures (in prev, gone now): bleed into the new frame.
-      - Arrivals (not in prev, present now): get ignored — model produces
-        a near-clone of the previous frame.
+    History: this initially tried to mask departures (segment-out vacating
+    characters from prev_frame) and demote only arrivals. In practice the
+    mask path produced *identity bleed* — FLUX.2 fills the empty silhouette
+    with whatever character ref it has on hand (e.g. canvas_dinner_v7 shot 3
+    rendered a second copy of the man into the woman's masked seat).
 
-    Mitigation:
-      - Departures: segment-out their stored bboxes from the prev_frame.
-      - Arrivals: demote the shot to location_reappearance — masking can't
-        conjure an arrival, and the wrong cast is worse than no spatial cue.
+    The model honors what's in the refs, not negative prompt cues. So:
+      - Arrivals (cast adds): masking can't conjure a new person.
+      - Departures (cast drops): masking leaves a silhouette that bleeds.
+
+    Both fail. Drop prev_frame entirely on any cast diff and fall back to
+    the location anchor + remaining character anchors. Loses spatial
+    continuity for the affected shot, gains correct cast.
     """
     if shot.continuation_mode is not ContinuationMode.previous_frame_continuation or shot.index == 0:
         return anchors
 
     prev_shot = plan.shots[shot.index - 1]
-    prev_present = _present_chars(prev_shot.character_states)
-    curr_present = _present_chars(shot.character_states)
-    departures = prev_present - curr_present
-    arrivals = curr_present - prev_present
-
-    if arrivals:
-        anchors.previous_frame = None
-        loc = memory.locations.get(shot.location_id) if shot.location_id else None
-        anchors.location_ref = str(loc) if loc else None
+    if _present_chars(prev_shot.character_states) == _present_chars(shot.character_states):
         return anchors
 
-    if not departures or not anchors.previous_frame or not settings.enable_segmentation:
-        return anchors
-
-    bboxes_prev = memory.frame_char_bboxes.get(shot.index - 1, {})
-    departure_bboxes = [bboxes_prev[cid] for cid in departures if cid in bboxes_prev]
-    if not departure_bboxes:
-        return anchors
-
-    masked_dir.mkdir(parents=True, exist_ok=True)
-    masked = extract_location_anchor(
-        Path(anchors.previous_frame), departure_bboxes,
-        masked_dir / f"shot_{shot.index:04d}.png",
-        model_name=settings.segment_model, bg_color=settings.segment_bg_color,
-    )
-    anchors.previous_frame = str(masked)
+    anchors.previous_frame = None
+    loc = memory.locations.get(shot.location_id) if shot.location_id else None
+    anchors.location_ref = str(loc) if loc else None
     return anchors
 
 

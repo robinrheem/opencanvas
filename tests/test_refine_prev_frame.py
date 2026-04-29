@@ -71,38 +71,15 @@ def test_arrival_demotes_to_location_reappearance(tmp_path: Path, make_image):
     assert out.location_ref == str(m.locations["loc-a"])
 
 
-def test_departure_masks_prev_frame(tmp_path: Path, make_image, mock_rembg):
+def test_departure_demotes_to_location_reappearance(tmp_path: Path, make_image):
+    """Cast drop → drop prev_frame, fall back to location anchor.
+    Mask path was removed because FLUX.2 fills the silhouette with another
+    character ref (identity bleed observed in canvas_dinner_v7 shot 3)."""
     m = Memory.empty(tmp_path / "mem")
     prev = make_image(name="prev.png", color=(50, 60, 70), size=64)
     m.add_frame(0, prev)
-    m.set_frame_bboxes(0, {"c2": BBox(x=0.5, y=0.0, w=0.5, h=1.0)})
+    m.add_location("loc-a", prev)
 
-    def fake_remove(img, **kwargs):
-        # Pretend the right half is fully foreground (alpha=255), left fully background.
-        return Image.new("RGBA", img.size, (0, 0, 0, 255))
-
-    mock_rembg(fake_remove)
-
-    s0 = _shot(0, ContinuationMode.fresh_location,
-               chars={"c1": "default", "c2": "default"})
-    s1 = _shot(1, ContinuationMode.previous_frame_continuation,
-               chars={"c1": "default", "c2": CharacterState.not_present})  # c2 departs
-    anchors = AnchorSet(previous_frame=str(m.frames[0]))
-
-    out = refine_prev_frame_anchor(s1, _plan([s0, s1]), anchors, m, _settings(tmp_path),
-                                   masked_dir=tmp_path / "masked")
-
-    assert out.previous_frame is not None
-    assert out.previous_frame != str(m.frames[0])  # rewritten
-    assert (tmp_path / "masked" / "shot_0001.png").exists()
-
-
-def test_departure_without_stored_bbox_passthrough(tmp_path: Path, make_image):
-    """No stored bbox for the departing char → cannot mask, leave prev_frame intact."""
-    m = Memory.empty(tmp_path / "mem")
-    src = make_image(name="prev.png")
-    m.add_frame(0, src)
-    # Note: NO set_frame_bboxes call.
     s0 = _shot(0, ContinuationMode.fresh_location,
                chars={"c1": "default", "c2": "default"})
     s1 = _shot(1, ContinuationMode.previous_frame_continuation,
@@ -112,7 +89,8 @@ def test_departure_without_stored_bbox_passthrough(tmp_path: Path, make_image):
     out = refine_prev_frame_anchor(s1, _plan([s0, s1]), anchors, m, _settings(tmp_path),
                                    masked_dir=tmp_path / "masked")
 
-    assert out.previous_frame == str(m.frames[0])  # untouched
+    assert out.previous_frame is None
+    assert out.location_ref == str(m.locations["loc-a"])
 
 
 def test_non_prev_frame_mode_passthrough(tmp_path: Path, make_image):
