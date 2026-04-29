@@ -383,6 +383,63 @@ def retrieve(shot: Shot, plan: Plan, memory: Memory) -> AnchorSet:
     return anchors
 
 
+def _present_chars(states: dict[str, str]) -> set[str]:
+    absent = {CharacterState.not_present}
+    return {cid for cid, st in states.items() if st not in absent}
+
+
+def refine_prev_frame_anchor(
+    shot: Shot, plan: Plan, anchors: AnchorSet, memory: Memory, settings: Settings,
+    masked_dir: Path,
+) -> AnchorSet:
+    """Reconcile cast diff between prev_shot and current shot when
+    previous_frame_continuation is in effect.
+
+    Image-edit models weight image conditioning over text. If the previous
+    frame's cast doesn't match the current shot, prompt-based "absent" /
+    "present" instructions lose to the visual prior:
+      - Departures (in prev, gone now): bleed into the new frame.
+      - Arrivals (not in prev, present now): get ignored — model produces
+        a near-clone of the previous frame.
+
+    Mitigation:
+      - Departures: segment-out their stored bboxes from the prev_frame.
+      - Arrivals: demote the shot to location_reappearance — masking can't
+        conjure an arrival, and the wrong cast is worse than no spatial cue.
+    """
+    if shot.continuation_mode is not ContinuationMode.previous_frame_continuation or shot.index == 0:
+        return anchors
+
+    prev_shot = plan.shots[shot.index - 1]
+    prev_present = _present_chars(prev_shot.character_states)
+    curr_present = _present_chars(shot.character_states)
+    departures = prev_present - curr_present
+    arrivals = curr_present - prev_present
+
+    if arrivals:
+        anchors.previous_frame = None
+        loc = memory.locations.get(shot.location_id) if shot.location_id else None
+        anchors.location_ref = str(loc) if loc else None
+        return anchors
+
+    if not departures or not anchors.previous_frame or not settings.enable_segmentation:
+        return anchors
+
+    bboxes_prev = memory.frame_char_bboxes.get(shot.index - 1, {})
+    departure_bboxes = [bboxes_prev[cid] for cid in departures if cid in bboxes_prev]
+    if not departure_bboxes:
+        return anchors
+
+    masked_dir.mkdir(parents=True, exist_ok=True)
+    masked = extract_location_anchor(
+        Path(anchors.previous_frame), departure_bboxes,
+        masked_dir / f"shot_{shot.index:04d}.png",
+        model_name=settings.segment_model, bg_color=settings.segment_bg_color,
+    )
+    anchors.previous_frame = str(masked)
+    return anchors
+
+
 # --- Anchor extraction primitives ------------------------------------------
 
 

@@ -17,6 +17,7 @@ from .agents import (
     extract_visibility,
     generate,
     plan,
+    refine_prev_frame_anchor,
     retrieve,
     segment_to_anchor,
     select,
@@ -182,6 +183,10 @@ async def run(
     with Cache(str(settings.cache_dir), tag_index=True) as cache:
         for shot in p.shots:
             anchors = retrieve(shot, p, memory)
+            anchors = refine_prev_frame_anchor(
+                shot, p, anchors, memory, settings,
+                masked_dir=settings.out_dir / "masked_prev",
+            )
             candidates = _cached_generate(
                 cache, shot, anchors, bg_by_shot.get(shot.index),
                 settings, pipe, seed=seed_of(shot),
@@ -190,6 +195,10 @@ async def run(
 
             memory.add_frame(shot.index, chosen)
             visibility = await extract_visibility(shot, chosen, settings)
+            memory.set_frame_bboxes(shot.index, {
+                cv.character_id: cv.bbox
+                for cv in visibility.characters if cv.visible and cv.bbox
+            })
             _refresh_anchors(
                 shot, chosen, memory, visibility,
                 crop_dir=settings.out_dir / "crops" / f"shot_{shot.index:04d}",

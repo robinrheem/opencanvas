@@ -5,6 +5,8 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .schemas import BBox
+
 _SUBDIRS = ("characters", "characters_canonical", "locations", "props", "frames")
 _SEP = "::"
 
@@ -32,6 +34,7 @@ class Memory:
     locations: dict[str, Path] = field(default_factory=dict)
     props: dict[tuple[str, str], Path] = field(default_factory=dict)
     frames: dict[int, Path] = field(default_factory=dict)
+    frame_char_bboxes: dict[int, dict[str, BBox]] = field(default_factory=dict)
 
     @classmethod
     def empty(cls, root: Path) -> "Memory":
@@ -56,6 +59,10 @@ class Memory:
             locations={k: root / v for k, v in raw.get("locations", {}).items()},
             props=_parse_pairs(raw.get("props", {}), root),
             frames={int(k): root / v for k, v in raw.get("frames", {}).items()},
+            frame_char_bboxes={
+                int(idx): {cid: BBox.model_validate(b) for cid, b in chars.items()}
+                for idx, chars in raw.get("frame_char_bboxes", {}).items()
+            },
         )
 
     def save(self) -> None:
@@ -65,6 +72,10 @@ class Memory:
             "locations": {k: str(v.relative_to(self.root)) for k, v in self.locations.items()},
             "props": _dump_pairs(self.props, self.root),
             "frames": {str(k): str(v.relative_to(self.root)) for k, v in self.frames.items()},
+            "frame_char_bboxes": {
+                str(idx): {cid: bbox.model_dump() for cid, bbox in chars.items()}
+                for idx, chars in self.frame_char_bboxes.items()
+            },
         }
         (self.root / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -100,6 +111,9 @@ class Memory:
         path = self._copy_in("frames", f"shot_{idx:04d}", src)
         self.frames[idx] = path
         return path
+
+    def set_frame_bboxes(self, idx: int, bboxes: dict[str, BBox]) -> None:
+        self.frame_char_bboxes[idx] = bboxes
 
     # --- Smart lookups (logic beyond plain dict.get) ---
 
