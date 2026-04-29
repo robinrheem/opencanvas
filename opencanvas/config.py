@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     segment_model: str = "birefnet-general"
     segment_bg_color: tuple[int, int, int] = (128, 128, 128)
     enable_segmentation: bool = True
+    # Big-LaMa inpainting for location anchors. When False, falls back to the
+    # neutral-gray silhouette (paper-faithful but model reads silhouettes as
+    # "fill with people" → forced cast count). Inpainting closes the holes
+    # with coherent surrounding pixels so the location anchor is a clean
+    # empty scene with no compositional pressure on the image generator.
+    enable_inpainting: bool = True
 
     def ensure_dirs(self) -> None:
         self.out_dir.mkdir(parents=True, exist_ok=True)

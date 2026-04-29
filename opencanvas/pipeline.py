@@ -156,6 +156,7 @@ def _refresh_anchors(
                 chosen, subject_bboxes,
                 crop_dir / f"loc__{safe_filename(shot.location_id)}.png",
                 model_name=settings.segment_model, bg_color=settings.segment_bg_color,
+                enable_inpainting=settings.enable_inpainting,
             )
         else:
             anchor = chosen

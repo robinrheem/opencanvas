@@ -416,6 +416,67 @@ def _rembg_session(model_name: str):
     return new_session(model_name)
 
 
+_LAMA_URL = "https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt"
+_LAMA_PAD_MOD = 8
+
+
+def _ceil_modulo(x: int, mod: int) -> int:
+    return x if x % mod == 0 else (x // mod + 1) * mod
+
+
+@lru_cache(maxsize=1)
+def _lama_model():
+    """Big-LaMa torchscript model (Apache 2.0, ~200MB).
+
+    Inlined to avoid the simple-lama-inpainting wrapper's stale dep pins
+    (Pillow<10, numpy<2). Used for location anchor inpainting — fills
+    subject silhouettes with coherent background pixels so the image
+    generator sees a clean empty scene, not gray people-shaped plates
+    that imply forced cast count.
+    """
+    import torch
+    from torch.hub import download_url_to_file, get_dir
+
+    cache_path = Path(get_dir()) / "checkpoints" / "big-lama.pt"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cache_path.exists():
+        download_url_to_file(_LAMA_URL, str(cache_path), progress=True)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = torch.jit.load(str(cache_path), map_location=device)
+    model.eval()
+    return model, device
+
+
+def _lama_inpaint(image: Image.Image, mask: Image.Image) -> Image.Image:
+    """Run Big-LaMa on (RGB image, L mask). Mask: 0=keep, 255=inpaint."""
+    import numpy as np
+    import torch
+
+    model, device = _lama_model()
+
+    img_np = np.array(image.convert("RGB")).astype(np.float32) / 255.0
+    mask_np = (np.array(mask.convert("L")) > 0).astype(np.float32)
+
+    # CHW + symmetric-pad to multiple of 8
+    img_chw = np.transpose(img_np, (2, 0, 1))
+    mask_chw = mask_np[None, ...]
+    _, h, w = img_chw.shape
+    pad_h = _ceil_modulo(h, _LAMA_PAD_MOD) - h
+    pad_w = _ceil_modulo(w, _LAMA_PAD_MOD) - w
+    img_chw = np.pad(img_chw, ((0, 0), (0, pad_h), (0, pad_w)), mode="symmetric")
+    mask_chw = np.pad(mask_chw, ((0, 0), (0, pad_h), (0, pad_w)), mode="symmetric")
+
+    img_t = torch.from_numpy(img_chw).unsqueeze(0).to(device)
+    mask_t = torch.from_numpy(mask_chw).unsqueeze(0).to(device)
+
+    with torch.inference_mode():
+        out = model(img_t, mask_t)
+    out_np = out[0].permute(1, 2, 0).detach().cpu().numpy()
+    out_np = np.clip(out_np * 255, 0, 255).astype(np.uint8)
+    return Image.fromarray(out_np[:h, :w])  # crop pad off
+
+
 def _segment_rgba(crop: Image.Image, model_name: str) -> Image.Image:
     """Returns RGBA image with subject pixels opaque, background transparent."""
     from rembg import remove
@@ -452,32 +513,68 @@ def segment_to_anchor(
     return dest
 
 
+def _build_subject_mask(
+    frame_size: tuple[int, int], frame_rgba: Image.Image,
+    subject_bboxes: list[BBox], model_name: str,
+) -> Image.Image:
+    """Composite a single binary mask covering all subject silhouettes.
+
+    Per-bbox: crop, run rembg to find the person silhouette inside that bbox,
+    paste the alpha mask into a full-frame canvas. Output is L-mode (0 = keep,
+    255 = inpaint).
+    """
+    mask = Image.new("L", frame_size, 0)
+    for bbox in subject_bboxes:
+        box = _bbox_pixels(bbox, frame_size)
+        if not box:
+            continue
+        region = frame_rgba.crop(box)
+        fg = _segment_rgba(region, model_name)
+        mask.paste(fg.split()[-1], box[:2])
+    return mask
+
+
 def extract_location_anchor(
     frame_path: Path, subject_bboxes: list[BBox], dest: Path,
     model_name: str, bg_color: tuple[int, int, int] = _GRAY,
+    enable_inpainting: bool = True,
 ) -> Path:
-    """Background anchor: segment-out each subject silhouette, neutral-fill.
+    """Background anchor: segment-out each subject silhouette, then either
+    Big-LaMa inpaint the holes (default) or neutral-fill with bg_color.
 
     Paper Table 28: "Avoid including large foreground characters when possible."
-    Background geometry between subjects is preserved intact.
+
+    With inpainting the holes close with coherent surrounding pixels, so the
+    location anchor is a clean empty scene. Without it (neutral plate), the
+    silhouette gaps imply "person must go here" and force the image generator
+    to fill them — observed in canvas_dinner_v8 shot 3.
     """
     with Image.open(frame_path) as im:
-        out = im.convert("RGBA").copy()
+        rgba = im.convert("RGBA").copy()
     if not subject_bboxes:
-        out.convert("RGB").save(dest)
+        rgba.convert("RGB").save(dest)
         return dest
 
-    plate_full = Image.new("RGBA", out.size, (*bg_color, 255))
+    if enable_inpainting:
+        mask = _build_subject_mask(rgba.size, rgba, subject_bboxes, model_name)
+        if mask.getbbox() is None:  # no subject pixels found
+            rgba.convert("RGB").save(dest)
+            return dest
+        inpainted = _lama_inpaint(rgba.convert("RGB"), mask)
+        inpainted.save(dest)
+        return dest
+
+    # Fallback: neutral-gray silhouette plates (paper-faithful, drift-prone).
+    plate_full = Image.new("RGBA", rgba.size, (*bg_color, 255))
     for bbox in subject_bboxes:
-        box = _bbox_pixels(bbox, out.size)
+        box = _bbox_pixels(bbox, rgba.size)
         if not box:
             continue
-        region = out.crop(box)
+        region = rgba.crop(box)
         fg = _segment_rgba(region, model_name)
         plate = plate_full.crop(box)
-        out.paste(Image.composite(plate, region, fg.split()[-1]), box[:2])
-
-    out.convert("RGB").save(dest)
+        rgba.paste(Image.composite(plate, region, fg.split()[-1]), box[:2])
+    rgba.convert("RGB").save(dest)
     return dest
 
 

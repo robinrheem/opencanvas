@@ -128,21 +128,51 @@ def test_segment_to_anchor_composites_subject_on_neutral_bg(make_image, mock_rem
         assert out.getpixel((50, 50)) == (255, 0, 0)
 
 
-def test_extract_location_anchor_masks_subject_bboxes(make_image, mock_rembg):
-    """Subjects' silhouettes inside their bboxes get neutral-filled; bg stays."""
+def test_extract_location_anchor_inpaints_subject_bboxes(make_image, mock_rembg, monkeypatch):
+    """Inpainting path: subject silhouettes replaced via Big-LaMa inpaint, no
+    silhouette-shaped gaps left."""
+    import opencanvas.agents as agents_mod
+
+    mock_rembg(_all_opaque_red)
+
+    def fake_lama_inpaint(rgb_image, mask):
+        # Pretend inpainter recolored the masked area to bright blue.
+        out = rgb_image.copy()
+        blue = Image.new("RGB", out.size, (0, 0, 255))
+        out.paste(blue, mask=mask)
+        return out
+
+    monkeypatch.setattr(agents_mod, "_lama_inpaint", fake_lama_inpaint)
+
+    src = make_image(color=(200, 200, 200))
+    dest = src.parent / "loc.png"
+
+    extract_location_anchor(
+        src, [BBox(x=0.0, y=0.0, w=0.5, h=0.5)], dest,
+        model_name="ignored", enable_inpainting=True,
+    )
+
+    with Image.open(dest) as out:
+        # Inside bbox: silhouette inpainted (fake = blue)
+        assert out.getpixel((10, 10)) == (0, 0, 255)
+        # Outside bbox: original frame preserved
+        assert out.getpixel((90, 90)) == (200, 200, 200)
+
+
+def test_extract_location_anchor_neutral_plate_fallback(make_image, mock_rembg):
+    """Fallback path (enable_inpainting=False) keeps the paper-faithful
+    neutral-gray silhouette behavior."""
     mock_rembg(_all_opaque_red)
     src = make_image(color=(200, 200, 200))
     dest = src.parent / "loc.png"
 
     extract_location_anchor(
         src, [BBox(x=0.0, y=0.0, w=0.5, h=0.5)], dest,
-        model_name="ignored", bg_color=(50, 60, 70),
+        model_name="ignored", bg_color=(50, 60, 70), enable_inpainting=False,
     )
 
     with Image.open(dest) as out:
-        # Inside bbox: subject silhouette replaced with bg_color
         assert out.getpixel((10, 10)) == (50, 60, 70)
-        # Outside bbox: original frame preserved
         assert out.getpixel((90, 90)) == (200, 200, 200)
 
 
