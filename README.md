@@ -43,7 +43,7 @@ For each shot t:
     │       (canonical-vs-recent character rule, prop fallback chain)
     │
     ├── _cached_generate(...)                   ── Diskcache resume layer
-    │       diffusers.QwenImageEditPlusPipeline
+    │       diffusers.Flux2KleinPipeline
     │       → K candidate PNGs
     │
     ├── select(candidates, shot, memory)        ── Algorithm 3: K concurrent VLM judges
@@ -74,7 +74,7 @@ For each shot t:
 
 **Requirements**
 - Python 3.12
-- A CUDA-capable GPU (B200, H100, or anything with ≥40 GB free VRAM for Qwen-Image-Edit-2509 + ~1 GB for BiRefNet)
+- A CUDA-capable GPU (B200, H100, or anything with ≥40 GB free VRAM for FLUX.2 [klein] 4B + ~1 GB for BiRefNet)
 - An OpenAI-compatible HTTP endpoint serving a multimodal LLM (Gemma 4 31B is the default; any tool-call-capable VLM works with minor prompt tuning)
 - `uv` for dependency management
 
@@ -209,12 +209,11 @@ All settings come from `pydantic_settings.BaseSettings` with prefix `OPENCANVAS_
 | `base_url` | `OPENCANVAS_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compat endpoint |
 | `api_key` | `OPENCANVAS_API_KEY` | `ollama` | Any non-empty token; ignored by Ollama / vLLM |
 | `model` | `OPENCANVAS_MODEL` | `gemma4:31b` | Served model name (must match `--served-model-name`) |
-| `image_model` | `OPENCANVAS_IMAGE_MODEL` | `Qwen/Qwen-Image-Edit-2509` | HF repo id for diffusers |
+| `image_model` | `OPENCANVAS_IMAGE_MODEL` | `black-forest-labs/FLUX.2-klein-4B` | HF repo id for diffusers |
 | `device` | `OPENCANVAS_DEVICE` | `cuda` | Torch device for diffusers + per-candidate generators |
 | `k_candidates` | `OPENCANVAS_K_CANDIDATES` | `4` | K from Algorithm 1 |
-| `num_inference_steps` | `OPENCANVAS_NUM_INFERENCE_STEPS` | `40` | Diffusion denoising steps |
-| `true_cfg_scale` | `OPENCANVAS_TRUE_CFG_SCALE` | `4.0` | Qwen-Image-Edit's classifier-free-guidance scale |
-| `guidance_scale` | `OPENCANVAS_GUIDANCE_SCALE` | `1.0` | Standard CFG (kept for compatibility; Qwen ignores) |
+| `num_inference_steps` | `OPENCANVAS_NUM_INFERENCE_STEPS` | `4` | FLUX.2 [klein] is step-distilled |
+| `guidance_scale` | `OPENCANVAS_GUIDANCE_SCALE` | `1.0` | FLUX.2 [klein] is guidance-distilled (CFG ignored) |
 | `seed` | `OPENCANVAS_SEED` | `42` | Base seed |
 | `seed_stride` | `OPENCANVAS_SEED_STRIDE` | `1000` | Per-shot seed offset = `seed + index * stride` |
 | `cache_dir` | `OPENCANVAS_CACHE_DIR` | `./cache` | Diskcache directory |
@@ -255,7 +254,7 @@ Prop anchors walk a three-step fallback: exact `(pid, state)` → `(pid, "defaul
 
 ### Generation (`generate` + `_cached_generate`)
 
-`diffusers.QwenImageEditPlusPipeline` is invoked with the ordered anchor images (previous frame first, then characters, then location, then props) plus a Table 25 prompt that describes the shot, lists the anchor roles, and appends the Table 21 background constraints. K candidates are produced with seeds `seed`, `seed+1`, …, `seed+K-1`. Each generation is cached on disk by SHA-256 over `(shot, ordered_anchors, seed, K)` so reruns short-circuit.
+`diffusers.Flux2KleinPipeline` is invoked with the ordered anchor images (previous frame first, then characters, then location, then props) plus a Table 25 prompt that describes the shot, lists the anchor roles, and appends the Table 21 background constraints. K candidates are produced with seeds `seed`, `seed+1`, …, `seed+K-1`. Each generation is cached on disk by SHA-256 over `(shot, ordered_anchors, seed, K)` so reruns short-circuit.
 
 ### Selection (`select`)
 
@@ -273,7 +272,7 @@ Empty-expected sets short-circuit without an LLM call.
 
 ### Anchor refresh (`_refresh_anchors`)
 
-For each visible character or prop with a bbox, OpenCanvas crops the chosen frame, runs BiRefNet via rembg to segment the subject, and composites it onto a neutral mid-gray plate. The result is stored as the per-entity anchor. This is the key mitigation for **background drift**: multi-image edit models like Qwen-Image-Edit-2509 condition on every pixel of every reference, so a character cropped while standing in a warehouse pulls warehouse pixels into the next shot. Segmenting the subject onto a neutral plate prevents that.
+For each visible character or prop with a bbox, OpenCanvas crops the chosen frame, runs BiRefNet via rembg to segment the subject, and composites it onto a neutral mid-gray plate. The result is stored as the per-entity anchor. This is the key mitigation for **background drift**: multi-image edit models like FLUX.2 [klein] 4B condition on every pixel of every reference, so a character cropped while standing in a warehouse pulls warehouse pixels into the next shot. Segmenting the subject onto a neutral plate prevents that.
 
 For the location anchor, OpenCanvas does the inverse: take the chosen frame, segment out every visible character/prop silhouette, and replace those pixels with the same neutral plate. Background geometry between subjects is preserved intact, satisfying Table 28's "avoid including large foreground characters" guideline.
 
@@ -294,7 +293,7 @@ OpenCanvas implements every paper component inside the generation scope. This se
 
 | Role | Paper | OpenCanvas |
 |---|---|---|
-| Image generation | Gemini-3-pro-image (Google API) | Qwen-Image-Edit-2509 (Apache 2.0) |
+| Image generation | Gemini-3-pro-image (Google API) | FLUX.2 [klein] 4B (Apache 2.0) |
 | LLM planner | Gemini-2.5-Flash | Gemma 4 31B Dense (multimodal) |
 | VLM judge + visibility | Gemini-2.5-Flash | Gemma 4 31B Dense (same model) |
 
@@ -305,8 +304,8 @@ Effect: results will not numerically match the paper's reported scores. Method a
 | Knob | Paper | OpenCanvas default |
 |---|---|---|
 | `K` (candidates per shot from Algorithm 1) | Not specified | `4` |
-| Diffusion `num_inference_steps` | Not specified | `40` (Qwen recommended) |
-| `true_cfg_scale` | Not specified | `4.0` (Qwen recommended) |
+| Diffusion `num_inference_steps` | Not specified | `4` (FLUX.2 [klein] step-distilled) |
+| `guidance_scale` | Not specified | `1.0` (FLUX.2 [klein] guidance-distilled) |
 
 All three are configurable via `Settings` / env vars / CLI flags.
 
@@ -339,7 +338,7 @@ OpenCanvas's inverse-segmentation is a defensible compromise but is not paper-pr
 
 ### Background-drift mitigation (additive)
 
-Multi-image edit models (Qwen-Image-Edit-2509, IP-Adapter, ReferenceNet) condition on every pixel of every reference. A character cropped while standing in a warehouse pulls warehouse pixels into the next shot regardless of the new shot's text prompt.
+Multi-image edit models (FLUX.2 [klein] 4B, IP-Adapter, ReferenceNet) condition on every pixel of every reference. A character cropped while standing in a warehouse pulls warehouse pixels into the next shot regardless of the new shot's text prompt.
 
 OpenCanvas mitigates by compositing each segmented subject onto a neutral mid-gray plate before storing as the memory anchor. The paper does not mention this — Gemini-3-pro-image apparently handles subject-vs-background separation more robustly out of the box. Set `OPENCANVAS_ENABLE_SEGMENTATION=false` to revert to bbox-only crops.
 

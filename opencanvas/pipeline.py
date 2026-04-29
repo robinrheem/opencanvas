@@ -50,9 +50,9 @@ class ShotResult:
 
 def _load_image_pipeline(settings: Settings) -> ImagePipeline:
     import torch
-    from diffusers import QwenImageEditPlusPipeline
+    from diffusers import Flux2KleinPipeline
 
-    pipe = QwenImageEditPlusPipeline.from_pretrained(
+    pipe = Flux2KleinPipeline.from_pretrained(
         settings.image_model, torch_dtype=torch.bfloat16
     ).to(settings.device)
     pipe.set_progress_bar_config(disable=True)

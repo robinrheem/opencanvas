@@ -25,9 +25,11 @@ def test_generate_writes_k_candidates(tmp_path: Path, torch_stub, fake_pipeline,
     assert all(p.exists() for p in paths)
     assert fake_pipeline.call_count == 3
     assert [c["generator"].initial_seed() for c in fake_pipeline.calls] == [1000, 1001, 1002]
-    assert fake_pipeline.calls[0]["true_cfg_scale"] == 4.0
     assert fake_pipeline.calls[0]["guidance_scale"] == 1.0
+    assert fake_pipeline.calls[0]["num_inference_steps"] == 4
     assert isinstance(fake_pipeline.calls[0]["image"], list)
+    assert "true_cfg_scale" not in fake_pipeline.calls[0]   # FLUX.2 doesn't take this
+    assert "negative_prompt" not in fake_pipeline.calls[0]   # nor this
     assert "must_appear" in fake_pipeline.calls[0]["prompt"]
 
 

@@ -19,12 +19,11 @@ class Settings(BaseSettings):
     api_key: str = "ollama"
     model: str = "gemma4:31b"
 
-    image_model: str = "Qwen/Qwen-Image-Edit-2509"
+    image_model: str = "black-forest-labs/FLUX.2-klein-4B"
     device: str = "cuda"  # e.g. "cuda", "cuda:0", "cuda:1", "cpu"
     k_candidates: int = 4
-    num_inference_steps: int = 40
-    true_cfg_scale: float = 4.0
-    guidance_scale: float = 1.0
+    num_inference_steps: int = 4   # FLUX.2 [klein] is step-distilled (~4 steps)
+    guidance_scale: float = 1.0    # FLUX.2 [klein] is guidance-distilled (CFG ignored)
     seed: int = 42
     seed_stride: int = 1000
 
