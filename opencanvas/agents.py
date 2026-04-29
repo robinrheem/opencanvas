@@ -542,19 +542,25 @@ def extract_location_anchor(
 # --- Image generation (Algorithm 2 step 7 + Table 25) -----------------------
 
 
-def _pad_to_min(im: Image.Image, min_side: int = _MIN_REF_SIDE) -> Image.Image:
-    """Pad with neutral gray so both dimensions are >= min_side.
+def _pad_ref(im: Image.Image, min_side: int = _MIN_REF_SIDE) -> Image.Image:
+    """Pad with neutral gray to a square at least min_side per side.
 
-    A narrow bbox crop can produce a 32px-wide image; FLUX.2 [klein] then
-    raises 'Image too small'. Pad rather than upscale to avoid synthesizing
-    pixels — the subject stays at original resolution, centered on a plate.
+    Two reasons:
+      1. FLUX.2 [klein] rejects refs with either side < 64px (narrow bbox
+         crops can be as thin as 32px wide).
+      2. FLUX.2 picks output aspect from the ref images. With portrait char
+         crops (e.g. 374×818) and a square location anchor, the first
+         portrait ref dominates and the output collapses to portrait —
+         observed in canvas_dinner_v6 shots 4-5 where the demote-on-arrival
+         path emitted a tight portrait of one character. Square refs let
+         the prompt + composition decide aspect, not the ref shape.
     """
     w, h = im.size
-    if w >= min_side and h >= min_side:
+    side = max(min_side, w, h)
+    if w == h == side:
         return im
-    nw, nh = max(w, min_side), max(h, min_side)
-    out = Image.new("RGB", (nw, nh), _GRAY)
-    out.paste(im, ((nw - w) // 2, (nh - h) // 2))
+    out = Image.new("RGB", (side, side), _GRAY)
+    out.paste(im, ((side - w) // 2, (side - h) // 2))
     return out
 
 
@@ -562,7 +568,7 @@ def _load_refs(paths: list[str]) -> list[Image.Image]:
     imgs: list[Image.Image] = []
     for p in paths:
         with Image.open(p) as im:
-            imgs.append(_pad_to_min(im.convert("RGB")))
+            imgs.append(_pad_ref(im.convert("RGB")))
     if not imgs:
         imgs.append(Image.new("RGB", (_FALLBACK_SIZE, _FALLBACK_SIZE), _GRAY))
     return imgs

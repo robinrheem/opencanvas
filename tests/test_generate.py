@@ -33,8 +33,9 @@ def test_generate_writes_k_candidates(tmp_path: Path, torch_stub, fake_pipeline,
     assert "must_appear" in fake_pipeline.calls[0]["prompt"]
 
 
-def test_generate_pads_tiny_refs(tmp_path: Path, torch_stub, fake_pipeline):
-    """Regression: FLUX.2 [klein] rejects refs with either side < 64px."""
+def test_generate_pads_refs_to_square(tmp_path: Path, torch_stub, fake_pipeline):
+    """Regression: portrait char crops + square location → output portrait.
+    All refs get padded to square at >=64px to neutralize aspect-bias."""
     from PIL import Image
 
     tiny = tmp_path / "tiny.png"
@@ -46,7 +47,9 @@ def test_generate_pads_tiny_refs(tmp_path: Path, torch_stub, fake_pipeline):
 
     assert len(paths) == 1
     ref = fake_pipeline.calls[0]["image"][0]
-    assert min(ref.size) >= 64
+    w, h = ref.size
+    assert w == h
+    assert w >= 64
 
 
 def test_generate_with_no_anchors_uses_gray(tmp_path: Path, torch_stub, fake_pipeline):

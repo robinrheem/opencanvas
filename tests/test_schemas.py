@@ -46,8 +46,16 @@ def test_anchorset_ordering():
         previous_frame="/prev.png",
         prop_refs=["/p.png"],
     )
-    # Order: prev frame, characters, location, props
-    assert a.ordered_paths() == ["/prev.png", "/c.png", "/bg.png", "/p.png"]
+    # Order: prev frame, location, characters, props.
+    # Location precedes characters so the scene anchor (square / wide) sets
+    # composition + aspect when prev_frame is absent (the demote-on-arrival
+    # path), instead of a portrait char crop hijacking the output shape.
+    assert a.ordered_paths() == ["/prev.png", "/bg.png", "/c.png", "/p.png"]
+
+
+def test_anchorset_ordering_no_prev_frame_puts_location_first():
+    a = AnchorSet(character_refs=["/a.png", "/b.png"], location_ref="/bg.png")
+    assert a.ordered_paths() == ["/bg.png", "/a.png", "/b.png"]
 
 
 def test_story_parsing():

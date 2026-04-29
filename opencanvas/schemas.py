@@ -185,12 +185,20 @@ class AnchorSet(BaseModel):
     previous_frame: str | None = None
 
     def ordered_paths(self) -> list[str]:
+        """Order refs so the strongest spatial prior is first.
+
+        previous_frame > location_ref > characters > props. FLUX.2's output
+        aspect / composition lean toward the leading ref; putting the scene
+        anchor first keeps wide shots wide. Without prev_frame and with a
+        location_ref present (the demote-on-arrival case), we still want
+        the location to dominate over individual character crops.
+        """
         out: list[str] = []
         if self.previous_frame:
             out.append(self.previous_frame)
-        out.extend(self.character_refs)
         if self.location_ref:
             out.append(self.location_ref)
+        out.extend(self.character_refs)
         out.extend(self.prop_refs)
         return out
 
