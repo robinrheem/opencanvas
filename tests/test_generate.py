@@ -33,6 +33,22 @@ def test_generate_writes_k_candidates(tmp_path: Path, torch_stub, fake_pipeline,
     assert "must_appear" in fake_pipeline.calls[0]["prompt"]
 
 
+def test_generate_pads_tiny_refs(tmp_path: Path, torch_stub, fake_pipeline):
+    """Regression: FLUX.2 [klein] rejects refs with either side < 64px."""
+    from PIL import Image
+
+    tiny = tmp_path / "tiny.png"
+    Image.new("RGB", (32, 200), color=(0, 0, 0)).save(tiny)
+    settings = Settings(out_dir=tmp_path / "out", k_candidates=1)
+    anchors = AnchorSet(character_refs=[str(tiny)])
+
+    paths = generate(_shot(), anchors, None, settings, fake_pipeline, seed=1)
+
+    assert len(paths) == 1
+    ref = fake_pipeline.calls[0]["image"][0]
+    assert min(ref.size) >= 64
+
+
 def test_generate_with_no_anchors_uses_gray(tmp_path: Path, torch_stub, fake_pipeline):
     settings = Settings(out_dir=tmp_path / "out", k_candidates=1)
     shot = Shot(

@@ -54,6 +54,20 @@ def test_crop_to_anchor_clamps_bbox(make_image):
         assert out.size == (10, 10)
 
 
+def test_crop_to_anchor_pixel_coords_autodetected(make_image):
+    """Regression: VLM emits bbox as pixel coords (e.g. x=12, w=311).
+    Without auto-detect, multiply-by-frame-size blows past the frame and
+    both ends clamp to width — bbox returns the full image, silently
+    breaking subject anchoring."""
+    src = make_image(size=400)
+    dest = src.parent / "px_crop.png"
+
+    crop_to_anchor(src, BBox(x=12.0, y=43.0, w=311.0, h=300.0), dest)
+
+    with Image.open(dest) as out:
+        assert out.size == (311, 300)
+
+
 def test_crop_to_anchor_degenerate_falls_back_to_full(make_image):
     src = make_image(color=(50, 50, 50))
     dest = src.parent / "fallback.png"

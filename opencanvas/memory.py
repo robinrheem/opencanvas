@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
 _SUBDIRS = ("characters", "characters_canonical", "locations", "props", "frames")
 _SEP = "::"
+
+
+def safe_filename(s: str) -> str:
+    """Sanitize an LLM-emitted state/id for use as a filesystem name component.
+
+    OSS planners produce values like '3/4_full', 'on the table', 'wine-glass:b'.
+    Slashes break path joins; spaces and colons aren't portable. Collapse
+    everything that isn't alphanumeric / underscore / dash into underscore.
+    """
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", s).strip("_") or "_"
 
 
 def _dump_pairs(d: dict[tuple[str, str], Path], root: Path) -> dict[str, str]:
@@ -77,22 +88,24 @@ class Memory:
     # --- Mutators (idempotent: copy file into memory dir + record path) ---
 
     def add_character(self, cid: str, state: str, src: Path) -> Path:
-        path = self._copy_in("characters", f"{cid}__{state}", src)
+        path = self._copy_in("characters", f"{safe_filename(cid)}__{safe_filename(state)}", src)
         self.characters[(cid, state)] = path
         return path
 
     def add_canonical(self, cid: str, state: str, src: Path) -> Path:
-        path = self._copy_in("characters_canonical", f"{cid}__{state}", src)
+        path = self._copy_in(
+            "characters_canonical", f"{safe_filename(cid)}__{safe_filename(state)}", src,
+        )
         self.characters_canonical[(cid, state)] = path
         return path
 
     def add_location(self, lid: str, src: Path) -> Path:
-        path = self._copy_in("locations", lid, src)
+        path = self._copy_in("locations", safe_filename(lid), src)
         self.locations[lid] = path
         return path
 
     def add_prop(self, pid: str, state: str, src: Path) -> Path:
-        path = self._copy_in("props", f"{pid}__{state}", src)
+        path = self._copy_in("props", f"{safe_filename(pid)}__{safe_filename(state)}", src)
         self.props[(pid, state)] = path
         return path
 

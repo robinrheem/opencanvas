@@ -63,6 +63,7 @@ from .schemas import (
 T = TypeVar("T", bound=BaseModel)
 _GRAY = (128, 128, 128)
 _FALLBACK_SIZE = 1024
+_MIN_REF_SIDE = 64  # FLUX.2 [klein] rejects refs with either side < 64px.
 
 
 class ImagePipeline(Protocol):
@@ -387,11 +388,25 @@ def retrieve(shot: Shot, plan: Plan, memory: Memory) -> AnchorSet:
 
 
 def _bbox_pixels(bbox: BBox, size: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    """Convert BBox to pixel coords, auto-detecting pixel vs normalized.
+
+    Gemma 4 31B (and other OSS VLMs) emit bboxes in pixel coords sometimes and
+    normalized [0,1] other times — even within the same run. Always-multiply
+    blows past frame on pixel emissions; both ends clamp to width and the
+    result silently degrades into "save the full frame as the per-entity
+    anchor", baking background into every char/prop ref. Threshold 1.5
+    leaves slightly-out-of-range normalized values on the normalized path.
+    """
     w, h = size
-    left = max(0, int(bbox.x * w))
-    top = max(0, int(bbox.y * h))
-    right = min(w, int((bbox.x + bbox.w) * w))
-    bottom = min(h, int((bbox.y + bbox.h) * h))
+    looks_pixels = max(bbox.x, bbox.y, bbox.w, bbox.h) > 1.5
+    if looks_pixels:
+        x, y, bw, bh = bbox.x, bbox.y, bbox.w, bbox.h
+    else:
+        x, y, bw, bh = bbox.x * w, bbox.y * h, bbox.w * w, bbox.h * h
+    left = max(0, int(x))
+    top = max(0, int(y))
+    right = min(w, int(x + bw))
+    bottom = min(h, int(y + bh))
     return (left, top, right, bottom) if right > left and bottom > top else None
 
 
@@ -469,11 +484,27 @@ def extract_location_anchor(
 # --- Image generation (Algorithm 2 step 7 + Table 25) -----------------------
 
 
+def _pad_to_min(im: Image.Image, min_side: int = _MIN_REF_SIDE) -> Image.Image:
+    """Pad with neutral gray so both dimensions are >= min_side.
+
+    A narrow bbox crop can produce a 32px-wide image; FLUX.2 [klein] then
+    raises 'Image too small'. Pad rather than upscale to avoid synthesizing
+    pixels — the subject keeps original resolution, plate fills the rest.
+    """
+    w, h = im.size
+    if w >= min_side and h >= min_side:
+        return im
+    nw, nh = max(w, min_side), max(h, min_side)
+    out = Image.new("RGB", (nw, nh), _GRAY)
+    out.paste(im, ((nw - w) // 2, (nh - h) // 2))
+    return out
+
+
 def _load_refs(paths: list[str]) -> list[Image.Image]:
     imgs: list[Image.Image] = []
     for p in paths:
         with Image.open(p) as im:
-            imgs.append(im.convert("RGB"))
+            imgs.append(_pad_to_min(im.convert("RGB")))
     if not imgs:
         imgs.append(Image.new("RGB", (_FALLBACK_SIZE, _FALLBACK_SIZE), _GRAY))
     return imgs
