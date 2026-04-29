@@ -63,6 +63,7 @@ from .schemas import (
 T = TypeVar("T", bound=BaseModel)
 _GRAY = (128, 128, 128)
 _FALLBACK_SIZE = 1024
+_MIN_REF_SIDE = 64  # FLUX.2 [klein] rejects refs with either side < 64px.
 
 
 class ImagePipeline(Protocol):
@@ -526,11 +527,27 @@ def extract_location_anchor(
 # --- Image generation (Algorithm 2 step 7 + Table 25) -----------------------
 
 
+def _pad_to_min(im: Image.Image, min_side: int = _MIN_REF_SIDE) -> Image.Image:
+    """Pad with neutral gray so both dimensions are >= min_side.
+
+    A narrow bbox crop can produce a 32px-wide image; FLUX.2 [klein] then
+    raises 'Image too small'. Pad rather than upscale to avoid synthesizing
+    pixels — the subject stays at original resolution, centered on a plate.
+    """
+    w, h = im.size
+    if w >= min_side and h >= min_side:
+        return im
+    nw, nh = max(w, min_side), max(h, min_side)
+    out = Image.new("RGB", (nw, nh), _GRAY)
+    out.paste(im, ((nw - w) // 2, (nh - h) // 2))
+    return out
+
+
 def _load_refs(paths: list[str]) -> list[Image.Image]:
     imgs: list[Image.Image] = []
     for p in paths:
         with Image.open(p) as im:
-            imgs.append(im.convert("RGB"))
+            imgs.append(_pad_to_min(im.convert("RGB")))
     if not imgs:
         imgs.append(Image.new("RGB", (_FALLBACK_SIZE, _FALLBACK_SIZE), _GRAY))
     return imgs
