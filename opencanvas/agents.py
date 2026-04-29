@@ -11,6 +11,7 @@ everything else awaits via `asyncio.gather` from `pipeline.run`.
 from __future__ import annotations
 
 import asyncio
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Protocol, TypeVar
@@ -574,17 +575,40 @@ def _anchor_labels(anchors: AnchorSet) -> str:
     return ", ".join(labels) or "(none)"
 
 
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _scrub_absent_characters(description: str, absent_names: list[str]) -> str:
+    """Remove sentences that mention absent characters by name + append a hard
+    exclusion clause.
+
+    Image-edit models honor what the description IMPLIES, not what the metadata
+    says. A sentence like "Person A's plate is untouched" makes FLUX.2 paint
+    Person A back into the frame, even when char-person-a is marked
+    not_present. Drop those sentences entirely, then add a final-line
+    constraint naming the absent characters.
+    """
+    if not absent_names:
+        return description
+    sentences = _SENTENCE_SPLIT.split(description)
+    kept = [s for s in sentences if not any(n in s for n in absent_names)]
+    cleaned = " ".join(kept).strip()
+    return f"{cleaned} {', '.join(absent_names)} are absent and must not appear in the frame."
+
+
 def generate(
     shot: Shot, anchors: AnchorSet, background_plan: BackgroundPlan | None,
     settings: Settings, pipeline: ImagePipeline, seed: int,
+    absent_names: list[str] | None = None,
 ) -> list[Path]:
     # lazy: tests stub sys.modules['torch'] before this runs
     import torch
 
     ref_imgs = _load_refs(anchors.ordered_paths())
+    description = _scrub_absent_characters(shot.description, absent_names or [])
     prompt = (
         CANDIDATE_GENERATION.format(
-            shot_description=shot.description,
+            shot_description=description,
             anchor_summary=_anchor_labels(anchors),
             character_states=_format_states(shot.character_states),
             prop_states=_format_prop_states_with_carriers(shot.prop_states, shot.prop_carriers),

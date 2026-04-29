@@ -33,6 +33,32 @@ def test_generate_writes_k_candidates(tmp_path: Path, torch_stub, fake_pipeline,
     assert "must_appear" in fake_pipeline.calls[0]["prompt"]
 
 
+def test_generate_scrubs_absent_character_sentences(
+    tmp_path: Path, torch_stub, fake_pipeline, tmp_image,
+):
+    """Regression: shot description that mentions an absent character (e.g.
+    'Person A's plate untouched') makes FLUX.2 paint them back in. Scrub
+    sentences naming absent chars + append a hard exclusion clause."""
+    settings = Settings(out_dir=tmp_path / "out", k_candidates=1)
+    anchors = AnchorSet(character_refs=[str(tmp_image)])
+    shot = Shot(
+        index=3, description=(
+            "Person B sits alone at the table eating slowly. "
+            "Person A's plate is untouched. "
+            "The candles flicker."
+        ),
+        location_id="loc-a", continuation_mode=ContinuationMode.previous_frame_continuation,
+        character_states={"char-person-a": "not_present", "char-person-b": "default"},
+    )
+
+    generate(shot, anchors, None, settings, fake_pipeline, seed=1, absent_names=["Person A"])
+
+    prompt = fake_pipeline.calls[0]["prompt"]
+    assert "Person A's plate is untouched" not in prompt
+    assert "Person A are absent and must not appear" in prompt
+    assert "Person B sits alone at the table" in prompt  # kept
+
+
 def test_generate_pads_refs_to_square(tmp_path: Path, torch_stub, fake_pipeline):
     """Regression: portrait char crops + square location → output portrait.
     All refs get padded to square at >=64px to neutralize aspect-bias."""

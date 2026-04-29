@@ -73,12 +73,15 @@ def _seed_canonical_anchors(story: Story, memory: Memory) -> None:
 def _cached_generate(
     cache: Cache, shot: Shot, anchors: AnchorSet, bg_plan: BackgroundPlan | None,
     settings: Settings, pipeline: ImagePipeline, seed: int,
+    absent_names: list[str] | None = None,
 ) -> list[Path]:
     key = make_generation_key(shot, anchors, seed, settings.k_candidates)
     hit = cache.get(key)
     if hit and all(Path(p).exists() for p in hit):
         return [Path(p) for p in hit]
-    paths = generate(shot, anchors, bg_plan, settings, pipeline, seed=seed)
+    paths = generate(
+        shot, anchors, bg_plan, settings, pipeline, seed=seed, absent_names=absent_names,
+    )
     cache.set(key, [str(p) for p in paths], tag=CACHE_TAG_GENERATE)
     return paths
 
@@ -192,6 +195,7 @@ async def run(
     p = await plan(story, settings)
     (settings.out_dir / "plan.json").write_text(p.model_dump_json(indent=2))
     bg_by_shot = {bp.shot_index: bp for bp in p.background_plans}
+    char_names = {c.id: c.name for c in p.characters}
 
     results: list[ShotResult] = []
     with Cache(str(settings.cache_dir), tag_index=True) as cache:
@@ -201,9 +205,13 @@ async def run(
                 shot, p, anchors, memory, settings,
                 masked_dir=settings.out_dir / "masked_prev",
             )
+            absent_names = [
+                char_names[cid] for cid, st in shot.character_states.items()
+                if st == CharacterState.not_present and cid in char_names
+            ]
             candidates = _cached_generate(
                 cache, shot, anchors, bg_by_shot.get(shot.index),
-                settings, pipe, seed=seed_of(shot),
+                settings, pipe, seed=seed_of(shot), absent_names=absent_names,
             )
             chosen, scores = await select(candidates, shot, memory, settings)
 
