@@ -23,7 +23,7 @@ from .agents import (
     select,
 )
 from .config import CACHE_TAG_GENERATE, Settings
-from .memory import Memory
+from .memory import Memory, safe_filename
 from .schemas import (
     AnchorSet,
     BackgroundPlan,
@@ -121,9 +121,8 @@ def _refresh_subject_anchors(
             continue
         bbox = item[2] if item else None
         if bbox:
-            anchor = _subject_anchor(
-                chosen, bbox, crop_dir / f"{file_prefix}__{entity_id}__{state}.png", settings
-            )
+            fname = f"{file_prefix}__{safe_filename(entity_id)}__{safe_filename(state)}.png"
+            anchor = _subject_anchor(chosen, bbox, crop_dir / fname, settings)
         else:
             anchor = chosen
         add_anchor(entity_id, state, anchor)
@@ -156,7 +155,7 @@ def _refresh_anchors(
             ] + [pv.bbox for pv in visibility.props if pv.visible and pv.bbox]
             anchor = extract_location_anchor(
                 chosen, subject_bboxes,
-                crop_dir / f"loc__{shot.location_id}.png",
+                crop_dir / f"loc__{safe_filename(shot.location_id)}.png",
                 model_name=settings.segment_model, bg_color=settings.segment_bg_color,
             )
         else:
