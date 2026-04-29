@@ -414,12 +414,20 @@ def refine_prev_frame_anchor(
         return anchors
 
     prev_shot = plan.shots[shot.index - 1]
-    if _present_chars(prev_shot.character_states) == _present_chars(shot.character_states):
+    prev_present = _present_chars(prev_shot.character_states)
+    curr_present = _present_chars(shot.character_states)
+    if prev_present == curr_present:
         return anchors
 
+    # Cast diff: drop both prev_frame AND location_ref, fall back to char anchors + prompt.
+    # The location anchor (extract_location_anchor) leaves subject-shaped neutral
+    # silhouettes from the establishing shot — model fills every silhouette with a
+    # person, forcing the original cast count regardless of who's actually present
+    # (canvas_dinner_v8 shot 3 still rendered both chars even with prev_frame=None
+    # because the location anchor's two silhouettes implied "two seats taken").
+    # Trade location consistency for cast accuracy.
     anchors.previous_frame = None
-    loc = memory.locations.get(shot.location_id) if shot.location_id else None
-    anchors.location_ref = str(loc) if loc else None
+    anchors.location_ref = None
     return anchors
 
 

@@ -53,7 +53,10 @@ def test_no_change_passthrough_when_cast_unchanged(tmp_path: Path, make_image):
     assert out.previous_frame == str(m.frames[0])  # untouched
 
 
-def test_arrival_demotes_to_location_reappearance(tmp_path: Path, make_image):
+def test_arrival_drops_prev_and_location(tmp_path: Path, make_image):
+    """Cast diff drops BOTH prev_frame and location_ref. Location anchor
+    contains subject silhouettes that force person count; pure char-anchors
+    + prompt is the only way to get cast right."""
     m = Memory.empty(tmp_path / "mem")
     src = make_image(name="prev.png")
     m.add_frame(0, src)
@@ -62,19 +65,21 @@ def test_arrival_demotes_to_location_reappearance(tmp_path: Path, make_image):
                chars={"c1": "default", "c2": CharacterState.not_present})
     s1 = _shot(1, ContinuationMode.previous_frame_continuation,
                chars={"c1": "default", "c2": "default"})  # c2 arrives
-    anchors = AnchorSet(previous_frame=str(m.frames[0]))
+    anchors = AnchorSet(previous_frame=str(m.frames[0]), location_ref=str(m.locations["loc-a"]))
 
     out = refine_prev_frame_anchor(s1, _plan([s0, s1]), anchors, m, _settings(tmp_path),
                                    masked_dir=tmp_path / "masked")
 
     assert out.previous_frame is None
-    assert out.location_ref == str(m.locations["loc-a"])
+    assert out.location_ref is None
 
 
-def test_departure_demotes_to_location_reappearance(tmp_path: Path, make_image):
-    """Cast drop → drop prev_frame, fall back to location anchor.
-    Mask path was removed because FLUX.2 fills the silhouette with another
-    character ref (identity bleed observed in canvas_dinner_v7 shot 3)."""
+def test_departure_drops_prev_and_location(tmp_path: Path, make_image):
+    """Cast drop also drops both anchors. Same reason as arrivals — the
+    location anchor's subject silhouettes would force the model to fill
+    the vacated seat (canvas_dinner_v8 shot 3 still showed both chars
+    even with prev_frame=None because the location anchor implied two
+    seats taken)."""
     m = Memory.empty(tmp_path / "mem")
     prev = make_image(name="prev.png", color=(50, 60, 70), size=64)
     m.add_frame(0, prev)
@@ -84,13 +89,13 @@ def test_departure_demotes_to_location_reappearance(tmp_path: Path, make_image):
                chars={"c1": "default", "c2": "default"})
     s1 = _shot(1, ContinuationMode.previous_frame_continuation,
                chars={"c1": "default", "c2": CharacterState.not_present})
-    anchors = AnchorSet(previous_frame=str(m.frames[0]))
+    anchors = AnchorSet(previous_frame=str(m.frames[0]), location_ref=str(m.locations["loc-a"]))
 
     out = refine_prev_frame_anchor(s1, _plan([s0, s1]), anchors, m, _settings(tmp_path),
                                    masked_dir=tmp_path / "masked")
 
     assert out.previous_frame is None
-    assert out.location_ref == str(m.locations["loc-a"])
+    assert out.location_ref is None
 
 
 def test_non_prev_frame_mode_passthrough(tmp_path: Path, make_image):
