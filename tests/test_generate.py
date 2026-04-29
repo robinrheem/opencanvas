@@ -49,6 +49,24 @@ def test_generate_pads_tiny_refs(tmp_path: Path, torch_stub, fake_pipeline):
     assert min(ref.size) >= 64
 
 
+def test_generate_caps_extreme_aspect_ratio(tmp_path: Path, torch_stub, fake_pipeline):
+    """Regression: FLUX.2 [klein] rejects refs with aspect > 8:1.
+    A narrow tall char crop (e.g. 64×917, 14.3:1) must be padded so ratio <= 8."""
+    from PIL import Image
+
+    narrow = tmp_path / "narrow.png"
+    Image.new("RGB", (64, 917), color=(0, 0, 0)).save(narrow)
+    settings = Settings(out_dir=tmp_path / "out", k_candidates=1)
+    anchors = AnchorSet(character_refs=[str(narrow)])
+
+    paths = generate(_shot(), anchors, None, settings, fake_pipeline, seed=1)
+
+    assert len(paths) == 1
+    ref = fake_pipeline.calls[0]["image"][0]
+    w, h = ref.size
+    assert max(w / h, h / w) <= 8
+
+
 def test_generate_with_no_anchors_uses_gray(tmp_path: Path, torch_stub, fake_pipeline):
     settings = Settings(out_dir=tmp_path / "out", k_candidates=1)
     shot = Shot(

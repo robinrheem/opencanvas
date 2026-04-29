@@ -64,6 +64,7 @@ T = TypeVar("T", bound=BaseModel)
 _GRAY = (128, 128, 128)
 _FALLBACK_SIZE = 1024
 _MIN_REF_SIDE = 64  # FLUX.2 [klein] rejects refs with either side < 64px.
+_MAX_REF_ASPECT = 8  # FLUX.2 [klein] rejects refs with aspect ratio > 8:1.
 
 
 class ImagePipeline(Protocol):
@@ -609,17 +610,24 @@ def extract_location_anchor(
 # --- Image generation (Algorithm 2 step 7 + Table 25) -----------------------
 
 
-def _pad_to_min(im: Image.Image, min_side: int = _MIN_REF_SIDE) -> Image.Image:
-    """Pad with neutral gray so both dimensions are >= min_side.
+def _pad_to_min(
+    im: Image.Image, min_side: int = _MIN_REF_SIDE, max_aspect: int = _MAX_REF_ASPECT,
+) -> Image.Image:
+    """Pad with neutral gray so dims satisfy FLUX.2's two ref constraints:
+    each side >= min_side AND aspect ratio <= max_aspect.
 
-    A narrow bbox crop can produce a 32px-wide image; FLUX.2 [klein] then
-    raises 'Image too small'. Pad rather than upscale to avoid synthesizing
-    pixels — the subject keeps original resolution, plate fills the rest.
+    A narrow bbox crop can produce 32×917 — fails on min side (FLUX.2 wants 64+)
+    AND aspect (FLUX.2 caps at 8:1). Pad once to fix both.
     """
     w, h = im.size
-    if w >= min_side and h >= min_side:
-        return im
     nw, nh = max(w, min_side), max(h, min_side)
+    # Cap aspect ratio: pad the shorter side until ratio fits.
+    if nw > nh * max_aspect:
+        nh = -(-nw // max_aspect)  # ceil divide
+    elif nh > nw * max_aspect:
+        nw = -(-nh // max_aspect)
+    if nw == w and nh == h:
+        return im
     out = Image.new("RGB", (nw, nh), _GRAY)
     out.paste(im, ((nw - w) // 2, (nh - h) // 2))
     return out
