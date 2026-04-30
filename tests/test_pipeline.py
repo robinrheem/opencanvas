@@ -28,3 +28,10 @@ def test_pipeline_end_to_end(tmp_path: Path, patched_llm, torch_stub, fake_pipel
         assert r.chosen.exists()
     assert (settings.out_dir / "memory" / "manifest.json").exists()
     assert any((settings.out_dir / "memory" / "frames").iterdir())
+
+    # Observability artifacts
+    logs = settings.out_dir / "logs"
+    assert (logs / "llm" / "location_clustering.jsonl").exists()
+    assert (logs / "llm" / "judge_scoring.jsonl").exists()
+    assert (logs / "decisions" / "shot_0000.json").exists()
+    assert (logs / "cache.log").exists()

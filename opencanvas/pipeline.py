@@ -22,6 +22,7 @@ from .agents import (
     select,
 )
 from .config import CACHE_TAG_GENERATE, Settings
+from .logs import Logger, set_active
 from .memory import Memory, safe_filename
 from .schemas import (
     AnchorSet,
@@ -72,11 +73,16 @@ def _seed_canonical_anchors(story: Story, memory: Memory) -> None:
 def _cached_generate(
     cache: Cache, shot: Shot, anchors: AnchorSet, bg_plan: BackgroundPlan | None,
     settings: Settings, pipeline: ImagePipeline, seed: int,
+    logger: Logger | None = None,
 ) -> list[Path]:
     key = make_generation_key(shot, anchors, seed, settings.k_candidates)
     hit = cache.get(key)
     if hit and all(Path(p).exists() for p in hit):
+        if logger is not None:
+            logger.log_cache(shot.index, "HIT", key)
         return [Path(p) for p in hit]
+    if logger is not None:
+        logger.log_cache(shot.index, "MISS", key)
     paths = generate(shot, anchors, bg_plan, settings, pipeline, seed=seed)
     cache.set(key, [str(p) for p in paths], tag=CACHE_TAG_GENERATE)
     return paths
@@ -174,6 +180,8 @@ async def run(
     _seed_canonical_anchors(story, memory)
     pipe = image_pipeline if image_pipeline is not None else _load_image_pipeline(settings)
     seed_of = seed_maker or (lambda s: settings.seed + s.index * settings.seed_stride)
+    logger = Logger(settings.out_dir, enabled=settings.enable_logging)
+    set_active(logger)
 
     p = await plan(story, settings)
     (settings.out_dir / "plan.json").write_text(p.model_dump_json(indent=2))
@@ -183,9 +191,14 @@ async def run(
     with Cache(str(settings.cache_dir), tag_index=True) as cache:
         for shot in p.shots:
             anchors = retrieve(shot, p, memory)
+            seed = seed_of(shot)
+            chars_before = set(memory.characters.keys())
+            props_before = set(memory.props.keys())
+            locs_before = set(memory.locations.keys())
+
             candidates = _cached_generate(
                 cache, shot, anchors, bg_by_shot.get(shot.index),
-                settings, pipe, seed=seed_of(shot),
+                settings, pipe, seed=seed, logger=logger,
             )
             chosen, scores = await select(candidates, shot, memory, settings)
 
@@ -198,12 +211,37 @@ async def run(
             )
             memory.save()
 
+            best = max(scores, key=lambda s: s.overall_score)
+            anchor_updates = sorted(
+                [f"char {a}::{b}" for (a, b) in memory.characters.keys() - chars_before]
+                + [f"prop {a}::{b}" for (a, b) in memory.props.keys() - props_before]
+                + [f"location {lid}" for lid in memory.locations.keys() - locs_before]
+            )
+            logger.log_decision(shot.index, {
+                "shot_index": shot.index,
+                "description": shot.description,
+                "location_id": shot.location_id,
+                "continuation_mode": shot.continuation_mode.value,
+                "expected_cast": [
+                    cid for cid, st in shot.character_states.items() if st != "not_present"
+                ],
+                "anchors_fed": anchors.model_dump(),
+                "candidate_paths": [str(c) for c in candidates],
+                "candidate_seeds": [seed + i for i in range(settings.k_candidates)],
+                "judge_scores": [s.model_dump() for s in scores],
+                "chosen_index": best.candidate_index,
+                "chosen": str(chosen),
+                "visibility_after": visibility.model_dump(),
+                "anchor_updates": anchor_updates,
+            })
+
             results.append(ShotResult(
                 shot=shot, anchors=anchors, candidates=candidates,
                 scores=scores, chosen=chosen,
             ))
             _write_results(settings.out_dir, results)
 
+    set_active(None)
     return p, results
 
 

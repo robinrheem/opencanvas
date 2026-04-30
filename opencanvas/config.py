@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     segment_model: str = "birefnet-general"
     segment_bg_color: tuple[int, int, int] = (128, 128, 128)
     enable_segmentation: bool = True
+    # Per-run observability: JSONL of every LLM/VLM call, per-shot decision
+    # summaries, cache hit/miss audit. Disable for benchmarks where the disk
+    # cost matters.
+    enable_logging: bool = True
     # Big-LaMa inpainting for location anchors. When False, falls back to the
     # neutral-gray silhouette (paper-faithful but model reads silhouettes as
     # "fill with people" → forced cast count). Inpainting closes the holes

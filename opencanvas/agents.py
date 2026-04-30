@@ -11,6 +11,7 @@ everything else awaits via `asyncio.gather` from `pipeline.run`.
 from __future__ import annotations
 
 import asyncio
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Protocol, TypeVar
@@ -22,6 +23,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from .config import Settings
+from .logs import active as _active_logger
 from .memory import Memory
 from .prompts import (
     BACKGROUND_PLANNING,
@@ -105,10 +107,26 @@ async def _llm(
     instructions: str,
     prompt: str | list,
     settings: Settings,
+    label: str | None = None,
 ) -> T:
     """Run a typed pydantic-ai call. `prompt` is a string or a list of parts
-    mixing strings and BinaryContent for multimodal calls."""
-    return (await _agent_for(output_type, instructions, settings).run(prompt)).output
+    mixing strings and BinaryContent for multimodal calls.
+
+    When a Logger is active in the current contextvar (set by pipeline.run)
+    AND `label` is provided, append a JSONL entry under logs/llm/<label>.jsonl
+    with input prompt, structured output, and latency.
+    """
+    t0 = time.perf_counter()
+    out = (await _agent_for(output_type, instructions, settings).run(prompt)).output
+    logger = _active_logger()
+    if logger is not None and label:
+        logger.log_call(
+            label=label, instructions=instructions, prompt=prompt, output=out,
+            output_type=output_type.__name__,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+            model=settings.model,
+        )
+    return out
 
 
 # --- Formatting helpers ------------------------------------------------------
@@ -160,7 +178,7 @@ async def _discover_entities(story: Story, settings: Settings) -> DiscoveredEnti
         f"Title: {story.title}\n\nShots:\n{_numbered(story.shots)}\n\n"
         "Return DiscoveredEntities with characters and props."
     )
-    return await _llm(DiscoveredEntities, ENTITY_EXTRACTION, user, settings)
+    return await _llm(DiscoveredEntities, ENTITY_EXTRACTION, user, settings, label="entity_discovery")
 
 
 async def _empty_discovery() -> DiscoveredEntities:
@@ -175,7 +193,7 @@ async def _cluster_locations(story: Story, settings: Settings) -> LocationCluste
         + f"\n\nKnown locations (hints): {[l.name for l in story.locations] or 'none'}\n"
         f"Return shot_location and shot_continuity_mode as lists of length {len(story.shots)}."
     )
-    c = await _llm(LocationClustering, LOCATION_CLUSTERING, user, settings)
+    c = await _llm(LocationClustering, LOCATION_CLUSTERING, user, settings, label="location_clustering")
     c.shot_location = _pad(c.shot_location, len(story.shots), "loc-0")
     c.shot_continuity_mode = _pad(
         c.shot_continuity_mode, len(story.shots), ContinuationMode.fresh_location
@@ -203,7 +221,7 @@ async def _plan_character(char: Character, shots: list[str], settings: Settings)
         + f"\n\nShots:\n{_numbered(shots)}\n\n"
         f"Return appearance_by_shot as a list of length {len(shots)}."
     )
-    tl = await _llm(CharacterTimeline, CHARACTER_PLANNING, user, settings)
+    tl = await _llm(CharacterTimeline, CHARACTER_PLANNING, user, settings, label="character_planning")
     return _pad(tl.appearance_by_shot, len(shots), CharacterState.default)
 
 
@@ -214,7 +232,7 @@ async def _plan_prop(prop: Prop, shots: list[str], settings: Settings) -> tuple[
         + f"\n\nShots:\n{_numbered(shots)}\n\n"
         f"Return state_by_shot and carrier_by_shot, each of length {len(shots)}."
     )
-    tl = await _llm(PropTimeline, PROP_PLANNING, user, settings)
+    tl = await _llm(PropTimeline, PROP_PLANNING, user, settings, label="prop_planning")
     return (
         _pad(tl.state_by_shot, len(shots), PropState.not_visible),
         _pad(tl.carrier_by_shot, len(shots), None),
@@ -229,7 +247,9 @@ async def _decide_continuation(
         f"Current shot: {curr_desc}\nCurrent location: {curr_loc}\n\n"
         "Decide continuation_mode."
     )
-    return (await _llm(ContinuationDecision, CONTINUATION_DECISION, user, settings)).continuation_mode
+    return (await _llm(
+        ContinuationDecision, CONTINUATION_DECISION, user, settings, label="continuation_decision",
+    )).continuation_mode
 
 
 async def _plan_background(shot: Shot, prop_history: list[dict], settings: Settings) -> BackgroundPlan:
@@ -245,7 +265,7 @@ async def _plan_background(shot: Shot, prop_history: list[dict], settings: Setti
         )
         + f"\n\nReturn a BackgroundPlan for shot index {shot.index}."
     )
-    bp = await _llm(BackgroundPlan, BACKGROUND_PLANNING, user, settings)
+    bp = await _llm(BackgroundPlan, BACKGROUND_PLANNING, user, settings, label="background_planning")
     bp.shot_index = shot.index
     return bp
 
@@ -707,7 +727,7 @@ async def select(
         s = await _llm(
             CandidateScore, JUDGE_SCORING,
             [judge_prompt, f"Candidate index: {i}", BinaryContent.from_path(cand), *prev_part],
-            settings,
+            settings, label="judge_scoring",
         )
         s.candidate_index = i
         return s
@@ -744,7 +764,7 @@ async def extract_visibility(shot: Shot, chosen: Path, settings: Settings) -> Fr
         if not expected:
             return []
         instr = CHAR_VISIBILITY.format(shot_description=shot.description, expected_characters=expected)
-        return (await _llm(_CharVis, instr, parts, settings)).characters
+        return (await _llm(_CharVis, instr, parts, settings, label="visibility_chars")).characters
 
     async def props() -> list[PropVisibility]:
         expected = {
@@ -754,13 +774,13 @@ async def extract_visibility(shot: Shot, chosen: Path, settings: Settings) -> Fr
         if not expected:
             return []
         instr = PROP_VISIBILITY.format(shot_description=shot.description, expected_props=expected)
-        return (await _llm(_PropVis, instr, parts, settings)).props
+        return (await _llm(_PropVis, instr, parts, settings, label="visibility_props")).props
 
     async def location() -> bool:
         if not shot.location_id:
             return False
         instr = BG_VISIBILITY.format(shot_description=shot.description, location=shot.location_id)
-        return (await _llm(_LocVis, instr, parts, settings)).visible
+        return (await _llm(_LocVis, instr, parts, settings, label="visibility_location")).visible
 
     c, l, p = await asyncio.gather(chars(), location(), props())
     return FrameVisibility(characters=c, location_visible=l, props=p)
