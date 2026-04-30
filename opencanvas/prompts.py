@@ -154,52 +154,43 @@ Input
 - The description of the previous shot.
 - The description of the current shot.
 - The location assignment of both shots.
-- The cast (named characters appearing in each shot).
+- The characters present in both shots.
+- The prop states in both shots.
 
 Instructions
-Choose exactly one of: previous_frame_continuation, location_reappearance, \
-fresh_location.
+Determine whether the current shot should be treated as \
+previous_frame_continuation, location_reappearance, or fresh_location.
 
-Definition: previous_frame_continuation means the current shot reuses the \
-EXACT spatial composition of the previous frame — same camera position, same \
-framing, same subject placement. The previous frame becomes the visual anchor \
-and only minor details change.
+Mark the current shot as previous_frame_continuation only if the current shot \
+depends on preserving the spatial structure of the immediately previous frame.
 
-Choose previous_frame_continuation ONLY when ALL of these are true:
-1. Same physical environment as the previous shot.
-2. Same camera framing — wide stays wide, close stays close, medium stays \
-medium. (A close-up after a wide shot is NOT continuation, even if location \
-matches — they need different compositions.)
-3. Same camera angle / position / distance from subject.
-4. Same cast (no character added or removed between shots).
-5. Immediate temporal continuation, not a later revisit after a cutaway.
+Reason about:
+1. Whether the previous shot and current shot occur in the same physical \
+environment.
+2. Whether the current shot is an immediate temporal continuation rather than a \
+later revisit.
+3. Whether the spatial arrangement of the scene should remain consistent across \
+the cut.
+4. Whether important background geometry must be preserved (walls, doors, \
+furniture, display cases, tables, platforms, or room layout).
+5. Whether character positions, object placements, or scene composition depend \
+on the previous frame.
+6. Whether the current shot is a close-up, zoom-in, alternate camera angle, or \
+tighter crop of the same ongoing scene.
+7. Whether there are state changes in the scene that still require maintaining \
+the same base spatial environment.
 
-Choose location_reappearance when the shot occurs in a previously-seen \
-environment but at least one of these is true:
-- Camera framing changed (wide → close, close → wide, alternate angle, pan \
-back, zoom in/out).
-- Cast composition changed (someone joined or left).
-- Time skip within the same place (e.g. "later", "after a moment", "the table \
-is now empty").
-- The shot is explicitly a "return to" or "pan back to" the location after an \
-intervening cutaway.
-
-Choose fresh_location when the shot is in an environment not previously seen \
-in the storyboard.
-
-Examples
-- Prev: wide shot of dining table, both seated. Curr: close-up on the woman \
-mid-sentence, bokeh background. → location_reappearance (camera framing \
-flipped wide→close, can't reuse spatial composition).
-- Prev: wide shot of dining table. Curr: wide shot of same table, slightly \
-later, woman now leaning back. → previous_frame_continuation (same framing, \
-same cast, immediate continuation).
-- Prev: close-up on man laughing. Curr: wide shot returning to the full table \
-after the laugh. → location_reappearance (close→wide flip, return to scene \
-after focused moment).
-- Prev: wide shot of dining room. Curr: tight shot of children playing across \
-the room. → fresh_location if play_area is a new location_id; otherwise \
-location_reappearance (different framing of same place).\
+Rules:
+- Choose previous_frame_continuation if the scene is still unfolding in the \
+same environment and preserving the exact spatial setup from the previous frame \
+is important.
+- Choose location_reappearance if the shot returns to a known location after an \
+intervening scene or temporal gap.
+- Choose fresh_location if the shot occurs in a new environment not previously \
+shown.
+- Even if some props or characters change state, still choose \
+previous_frame_continuation when the underlying scene geometry should remain \
+continuous.\
 """
 
 

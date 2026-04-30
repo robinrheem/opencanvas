@@ -239,25 +239,12 @@ async def _plan_prop(prop: Prop, shots: list[str], settings: Settings) -> tuple[
     )
 
 
-def _detect_cast(description: str, all_names: list[str]) -> list[str]:
-    """Pick character names that appear (case-insensitive) in the prose.
-    Used to give T24 explicit cast info per shot so it can refuse continuation
-    when the cast composition flips between shots."""
-    s = description.lower()
-    return [n for n in all_names if n and n.lower() in s]
-
-
 async def _decide_continuation(
-    prev_desc: str, curr_desc: str, prev_loc: str, curr_loc: str,
-    prev_cast: list[str], curr_cast: list[str], settings: Settings,
+    prev_desc: str, curr_desc: str, prev_loc: str, curr_loc: str, settings: Settings
 ) -> ContinuationMode:
     user = (
-        f"Previous shot: {prev_desc}\n"
-        f"Previous location: {prev_loc}\n"
-        f"Previous cast: {prev_cast or '(none mentioned)'}\n\n"
-        f"Current shot: {curr_desc}\n"
-        f"Current location: {curr_loc}\n"
-        f"Current cast: {curr_cast or '(none mentioned)'}\n\n"
+        f"Previous shot: {prev_desc}\nPrevious location: {prev_loc}\n\n"
+        f"Current shot: {curr_desc}\nCurrent location: {curr_loc}\n\n"
         "Decide continuation_mode."
     )
     return (await _llm(
@@ -310,10 +297,6 @@ async def plan(story: Story, settings: Settings) -> Plan:
     characters = story.characters or discovered.characters
     props = story.props or discovered.props
 
-    # Detect cast per shot from prose so T24 sees explicit cast diff.
-    char_names = [c.name for c in characters]
-    cast_per_shot = [_detect_cast(s, char_names) for s in story.shots]
-
     char_results, prop_results, raw_continuations = await asyncio.gather(
         asyncio.gather(*(_plan_character(c, story.shots, settings) for c in characters)),
         asyncio.gather(*(_plan_prop(p, story.shots, settings) for p in props)),
@@ -321,7 +304,6 @@ async def plan(story: Story, settings: Settings) -> Plan:
             _decide_continuation(
                 prev_desc=story.shots[t - 1], curr_desc=story.shots[t],
                 prev_loc=cluster.shot_location[t - 1], curr_loc=cluster.shot_location[t],
-                prev_cast=cast_per_shot[t - 1], curr_cast=cast_per_shot[t],
                 settings=settings,
             )
             for t in range(1, len(story.shots))
