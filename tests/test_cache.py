@@ -23,16 +23,13 @@ def test_second_run_hits_cache(tmp_path: Path, patched_llm, torch_stub, fake_pip
     )
 
     run(story, settings, image_pipeline=fake_pipeline)
-    # Count only candidate calls (image=list); skip text-to-image canonical
-    # location renders (image=None) which use the same pipeline.
-    candidate_calls = [c for c in fake_pipeline.calls if isinstance(c.get("image"), list)]
-    assert len(candidate_calls) == settings.k_candidates * len(story.shots)
+    first_calls = fake_pipeline.call_count
+    assert first_calls == settings.k_candidates * len(story.shots)
 
     fake_pipeline.calls.clear()
     run(story, settings, image_pipeline=fake_pipeline)
-    # Only shot 0 misses → at most K candidate calls.
-    candidate_calls = [c for c in fake_pipeline.calls if isinstance(c.get("image"), list)]
-    assert len(candidate_calls) <= settings.k_candidates
+    # Only shot 0 misses → at most K calls.
+    assert fake_pipeline.call_count <= settings.k_candidates
 
 
 def test_canonical_reference_seeded(tmp_path: Path, patched_llm, torch_stub, fake_pipeline):

@@ -12,13 +12,11 @@ from pydantic import TypeAdapter
 
 from .agents import (
     ImagePipeline,
-    bg_prop_state_snapshot,
     crop_to_anchor,
+    extract_location_anchor,
     extract_visibility,
     generate,
     plan,
-    render_location_anchor,
-    render_scene_description,
     retrieve,
     segment_to_anchor,
     select,
@@ -136,70 +134,11 @@ def _refresh_subject_anchors(
         add_anchor(entity_id, state, anchor)
 
 
-async def _seed_location_canonicals(
-    p: Plan, memory: Memory, settings: Settings, pipe: ImagePipeline,
-    bg_by_shot: dict[int, BackgroundPlan],
-) -> None:
-    """For each unique location_id, render one canonical empty-scene image
-    from text only (no refs). Uses the FIRST shot in that location to seed
-    bg-prop states. Snapshot stored in memory.location_canonical_state so
-    later shots can detect deltas and re-render."""
-    char_names = [c.name for c in p.characters]
-    loc_name_by_id = {lo.id: lo.name for lo in p.locations}
-    seen: set[str] = set()
-    for shot in p.shots:
-        lid = shot.location_id
-        if not lid or lid in seen:
-            continue
-        seen.add(lid)
-        bg_state = bg_prop_state_snapshot(shot, bg_by_shot.get(shot.index))
-        scene = await render_scene_description(
-            location_id=lid, location_name=loc_name_by_id.get(lid, lid),
-            shots_in_loc=[s.description for s in p.shots if s.location_id == lid],
-            character_names=char_names, bg_prop_states=bg_state, settings=settings,
-        )
-        # Deterministic seed per location for repeatability across runs.
-        seed = settings.seed + hash(lid) % 10_000
-        dest = memory.root / "locations" / f"{safe_filename(lid)}.png"
-        render_location_anchor(scene, dest, settings, pipe, seed=seed)
-        memory.locations[lid] = dest
-        memory.location_canonical_state[lid] = bg_state
-
-
-async def _maybe_refresh_location(
-    shot: Shot, p: Plan, memory: Memory, settings: Settings, pipe: ImagePipeline,
-    bg_by_shot: dict[int, BackgroundPlan], seed_of: Callable[[Shot], int],
-) -> None:
-    """Algorithm 4 location refresh: if bg-prop state changed since the last
-    canonical render for this location_id, re-render the canonical with the
-    new states embedded. Otherwise keep the existing anchor (no churn,
-    consistent backgrounds across same-location shots)."""
-    lid = shot.location_id
-    if not lid:
-        return
-    bg_state = bg_prop_state_snapshot(shot, bg_by_shot.get(shot.index))
-    if memory.location_canonical_state.get(lid) == bg_state:
-        return
-    char_names = [c.name for c in p.characters]
-    loc_name_by_id = {lo.id: lo.name for lo in p.locations}
-    scene = await render_scene_description(
-        location_id=lid, location_name=loc_name_by_id.get(lid, lid),
-        shots_in_loc=[s.description for s in p.shots if s.location_id == lid],
-        character_names=char_names, bg_prop_states=bg_state, settings=settings,
-    )
-    dest = memory.root / "locations" / f"{safe_filename(lid)}.png"
-    render_location_anchor(scene, dest, settings, pipe, seed=seed_of(shot))
-    memory.locations[lid] = dest
-    memory.location_canonical_state[lid] = bg_state
-
-
 def _refresh_anchors(
     shot: Shot, chosen: Path, memory: Memory, visibility: FrameVisibility,
     crop_dir: Path, settings: Settings,
 ) -> None:
-    """Algorithm 4 — VLM gates char/prop anchor refresh via bbox + segmentation.
-    Location anchor refresh is handled separately by `_maybe_refresh_location`
-    (text-to-image regen, not inpaint-from-frame)."""
+    """Algorithm 4 — VLM gates anchor refresh; subject-only anchors via bbox + segmentation."""
     crop_dir.mkdir(parents=True, exist_ok=True)
 
     _refresh_subject_anchors(
@@ -214,6 +153,21 @@ def _refresh_anchors(
         shot.prop_states, {PropState.not_visible, PropState.not_present},
         memory.add_prop, "prop", crop_dir, settings,
     )
+
+    if shot.location_id and visibility.location_visible:
+        if settings.enable_segmentation:
+            subject_bboxes = [
+                cv.bbox for cv in visibility.characters if cv.visible and cv.bbox
+            ] + [pv.bbox for pv in visibility.props if pv.visible and pv.bbox]
+            anchor = extract_location_anchor(
+                chosen, subject_bboxes,
+                crop_dir / f"loc__{safe_filename(shot.location_id)}.png",
+                model_name=settings.segment_model, bg_color=settings.segment_bg_color,
+                enable_inpainting=settings.enable_inpainting, device=settings.device,
+            )
+        else:
+            anchor = chosen
+        memory.add_location(shot.location_id, anchor)
 
 
 async def run(
@@ -232,11 +186,6 @@ async def run(
     p = await plan(story, settings)
     (settings.out_dir / "plan.json").write_text(p.model_dump_json(indent=2))
     bg_by_shot = {bp.shot_index: bp for bp in p.background_plans}
-
-    # Pre-loop canonical location render: one empty-scene image per unique
-    # location_id, generated text-to-image with current bg-prop states baked
-    # into the prompt. Replaces inpaint-from-chosen-frame for cleaner anchors.
-    await _seed_location_canonicals(p, memory, settings, pipe, bg_by_shot)
 
     results: list[ShotResult] = []
     with Cache(str(settings.cache_dir), tag_index=True) as cache:
@@ -259,9 +208,6 @@ async def run(
                 shot, chosen, memory, visibility,
                 crop_dir=settings.out_dir / "crops" / f"shot_{shot.index:04d}",
                 settings=settings,
-            )
-            await _maybe_refresh_location(
-                shot, p, memory, settings, pipe, bg_by_shot, seed_of,
             )
             memory.save()
 
