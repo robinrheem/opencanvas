@@ -50,6 +50,19 @@ class ShotResult:
 
 
 def _load_image_pipeline(settings: Settings) -> ImagePipeline:
+    """Pick image generator backend.
+
+    'flux2' (default) loads the local diffusers Flux2KleinPipeline.
+    'gemini' wraps Google's Gemini-3-pro-image API — paper backbone fidelity
+    when running OSS LLM locally and image gen via API.
+    """
+    if settings.image_backend == "gemini":
+        from .gemini_pipeline import GeminiImagePipeline
+        return GeminiImagePipeline(
+            api_key=settings.image_api_key,
+            model=settings.image_model,  # e.g. "gemini-3-pro-image-preview"
+        )
+
     import torch
     from diffusers import Flux2KleinPipeline
 

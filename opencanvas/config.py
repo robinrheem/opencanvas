@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     api_key: str = "ollama"
     model: str = "gemma4:31b"
 
+    image_backend: str = "flux2"  # "flux2" (local diffusers) | "gemini" (API)
     image_model: str = "black-forest-labs/FLUX.2-klein-4B"
+    image_api_key: str = ""  # required when image_backend="gemini"
     device: str = "cuda"  # e.g. "cuda", "cuda:0", "cuda:1", "cpu"
     k_candidates: int = 4
     num_inference_steps: int = 4   # FLUX.2 [klein] is step-distilled (~4 steps)
