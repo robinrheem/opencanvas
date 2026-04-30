@@ -41,6 +41,10 @@ class Memory:
     characters: dict[tuple[str, str], Path] = field(default_factory=dict)
     characters_canonical: dict[tuple[str, str], Path] = field(default_factory=dict)
     locations: dict[str, Path] = field(default_factory=dict)
+    # Snapshot of bg-prop states at the time each location's canonical was last
+    # rendered. Used by pipeline to detect prop-state deltas and trigger
+    # Algorithm 4 location-anchor refresh.
+    location_canonical_state: dict[str, dict[str, str]] = field(default_factory=dict)
     props: dict[tuple[str, str], Path] = field(default_factory=dict)
     frames: dict[int, Path] = field(default_factory=dict)
 
@@ -65,6 +69,7 @@ class Memory:
             characters=_parse_pairs(raw.get("characters", {}), root),
             characters_canonical=_parse_pairs(raw.get("characters_canonical", {}), root),
             locations={k: root / v for k, v in raw.get("locations", {}).items()},
+            location_canonical_state=raw.get("location_canonical_state", {}),
             props=_parse_pairs(raw.get("props", {}), root),
             frames={int(k): root / v for k, v in raw.get("frames", {}).items()},
         )
@@ -74,6 +79,7 @@ class Memory:
             "characters": _dump_pairs(self.characters, self.root),
             "characters_canonical": _dump_pairs(self.characters_canonical, self.root),
             "locations": {k: str(v.relative_to(self.root)) for k, v in self.locations.items()},
+            "location_canonical_state": self.location_canonical_state,
             "props": _dump_pairs(self.props, self.root),
             "frames": {str(k): str(v.relative_to(self.root)) for k, v in self.frames.items()},
         }

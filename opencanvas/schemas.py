@@ -117,6 +117,13 @@ class ContinuationDecision(BaseModel):
     continuation_mode: ContinuationMode
 
 
+class LocationScene(BaseModel):
+    """Empty-scene description used to text-to-image render a location's
+    canonical background anchor (Algorithm 4)."""
+
+    scene_description: str
+
+
 class BackgroundPlan(BaseModel):
     """Output of Table 21 — per-shot background reasoning."""
 

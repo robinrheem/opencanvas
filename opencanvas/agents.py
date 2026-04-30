@@ -35,6 +35,7 @@ from .prompts import (
     ENTITY_EXTRACTION,
     JUDGE_SCORING,
     LOCATION_CLUSTERING,
+    LOCATION_RENDERING,
     PROP_PLANNING,
     PROP_VISIBILITY,
 )
@@ -53,6 +54,7 @@ from .schemas import (
     FrameVisibility,
     Location,
     LocationClustering,
+    LocationScene,
     Plan,
     Prop,
     PropState,
@@ -625,6 +627,75 @@ def extract_location_anchor(
         rgba.paste(Image.composite(plate, region, fg.split()[-1]), box[:2])
     rgba.convert("RGB").save(dest)
     return dest
+
+
+# --- Stateful canonical location anchor (Algorithm 4) -----------------------
+
+
+async def render_scene_description(
+    location_id: str, location_name: str, shots_in_loc: list[str],
+    character_names: list[str], bg_prop_states: dict[str, str], settings: Settings,
+) -> str:
+    """Ask Gemma for an empty-scene prose prompt suitable for FLUX.2 t2i.
+
+    Excludes characters by name, embeds current bg prop states. Output is
+    one paragraph the image generator can render from scratch — no refs
+    needed, no subject silhouettes to inpaint away.
+    """
+    user = (
+        f"Location id: {location_id}\nLocation name: {location_name}\n\n"
+        f"Shots taking place at this location:\n{_numbered(shots_in_loc)}\n\n"
+        f"Characters that must NOT appear: {character_names or '(none declared)'}\n"
+        f"Current background prop states: {bg_prop_states or '(none)'}\n\n"
+        "Return LocationScene with scene_description."
+    )
+    out = await _llm(
+        LocationScene, LOCATION_RENDERING, user, settings, label="location_rendering",
+    )
+    return out.scene_description
+
+
+def render_location_anchor(
+    scene_description: str, dest: Path, settings: Settings, pipeline: ImagePipeline,
+    seed: int,
+) -> Path:
+    """FLUX.2 [klein] text-to-image render of an empty location scene.
+
+    No reference images — the prompt alone produces a clean canonical
+    background. Stable across shots that share the same location_id and
+    bg-prop state, so retrievals as `location_reappearance` see identical
+    pixels.
+    """
+    import torch
+
+    result = pipeline(
+        prompt=scene_description, image=None,
+        num_inference_steps=settings.num_inference_steps,
+        guidance_scale=settings.guidance_scale,
+        generator=torch.Generator(device=settings.device).manual_seed(seed),
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    result.images[0].save(dest)
+    return dest
+
+
+def bg_prop_state_snapshot(
+    shot: Shot, bg_plan: BackgroundPlan | None,
+) -> dict[str, str]:
+    """Subset of shot.prop_states that should appear in the background.
+
+    BackgroundPlan.background_props is T21's list of props that must remain
+    visible in the bg for this shot. carried_props are excluded — those
+    leave with their carrier and aren't in the empty-scene render.
+    """
+    if bg_plan is None:
+        return {}
+    carried_pids = {pid for pids in bg_plan.carried_props.values() for pid in pids}
+    return {
+        pid: shot.prop_states[pid]
+        for pid in bg_plan.background_props
+        if pid in shot.prop_states and pid not in carried_pids
+    }
 
 
 # --- Image generation (Algorithm 2 step 7 + Table 25) -----------------------
