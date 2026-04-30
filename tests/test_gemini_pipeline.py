@@ -54,7 +54,10 @@ def test_gemini_pipeline_call_kwargs_passed_to_client():
     with patch("google.genai.Client") as mock_cls:
         client = _fake_client(_png_bytes())
         mock_cls.return_value = client
-        pipe = GeminiImagePipeline(api_key="dummy", model="gemini-3-pro-image-preview")
+        pipe = GeminiImagePipeline(
+            api_key="dummy", model="gemini-3-pro-image-preview",
+            aspect_ratio="16:9", image_size="2K",
+        )
         ref = Image.new("RGB", (8, 8))
         pipe(prompt="x", image=[ref], num_inference_steps=4, guidance_scale=1.0, generator=None)
 
@@ -63,6 +66,10 @@ def test_gemini_pipeline_call_kwargs_passed_to_client():
     contents = call.kwargs["contents"]
     assert contents[0] == "x"
     assert contents[1] is ref
+    # image_config must be passed so every output is the same size.
+    config = call.kwargs["config"]
+    assert config.image_config.aspect_ratio == "16:9"
+    assert config.image_config.image_size == "2K"
 
 
 def test_gemini_pipeline_raises_when_no_image_part():

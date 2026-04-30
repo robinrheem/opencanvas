@@ -31,9 +31,17 @@ class GeminiImagePipeline:
     sets sampling internally. `generator`'s seed is also ignored (Gemini API
     does not currently expose deterministic seeding); per-candidate variation
     in K-of-K selection happens via independent API calls instead.
+
+    `aspect_ratio` and `image_size` are pinned via image_config so every
+    output frame has identical dimensions. Without this, Gemini infers
+    aspect from the prompt (close-up → portrait, wide → landscape) which
+    breaks storyboard coherence.
     """
 
-    def __init__(self, api_key: str, model: str = "gemini-3-pro-image-preview") -> None:
+    def __init__(
+        self, api_key: str, model: str = "gemini-3-pro-image-preview",
+        aspect_ratio: str = "16:9", image_size: str = "1K",
+    ) -> None:
         from google import genai
 
         if not api_key:
@@ -43,6 +51,8 @@ class GeminiImagePipeline:
             )
         self.client = genai.Client(api_key=api_key)
         self.model = model
+        self.aspect_ratio = aspect_ratio
+        self.image_size = image_size
 
     def __call__(
         self,
@@ -53,12 +63,20 @@ class GeminiImagePipeline:
         guidance_scale: float = 0.0,   # accepted for Protocol shape, unused
         generator: Any = None,         # accepted for Protocol shape, seed unused
     ) -> SimpleNamespace:
+        from google.genai import types
+
         contents: list[Any] = [prompt]
         if image:
             contents.extend(image)  # google-genai accepts PIL.Image directly
 
+        config = types.GenerateContentConfig(
+            image_config=types.ImageConfig(
+                aspect_ratio=self.aspect_ratio,
+                image_size=self.image_size,
+            ),
+        )
         response = self.client.models.generate_content(
-            model=self.model, contents=contents,
+            model=self.model, contents=contents, config=config,
         )
 
         candidate = response.candidates[0]

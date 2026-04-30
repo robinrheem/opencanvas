@@ -61,6 +61,8 @@ def _load_image_pipeline(settings: Settings) -> ImagePipeline:
         return GeminiImagePipeline(
             api_key=settings.image_api_key,
             model=settings.image_model,  # e.g. "gemini-3-pro-image-preview"
+            aspect_ratio=settings.image_aspect_ratio,
+            image_size=settings.image_size,
         )
 
     import torch

@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     image_backend: str = "flux2"  # "flux2" (local diffusers) | "gemini" (API)
     image_model: str = "black-forest-labs/FLUX.2-klein-4B"
     image_api_key: str = ""  # required when image_backend="gemini"
+    # Gemini image generation aspect / resolution. Pin so every shot comes out
+    # the same dimensions (Gemini otherwise picks per-shot from the prompt:
+    # close-ups → portrait, wides → landscape, breaking storyboard cohesion).
+    # Supported aspects: 1:1, 1:4, 1:8, 2:3, 3:2, 3:4, 4:1, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9, 8:1.
+    # Supported sizes: "512", "1K", "2K", "4K". Pricing scales with size.
+    image_aspect_ratio: str = "16:9"
+    image_size: str = "1K"
     device: str = "cuda"  # e.g. "cuda", "cuda:0", "cuda:1", "cpu"
     k_candidates: int = 4
     num_inference_steps: int = 4   # FLUX.2 [klein] is step-distilled (~4 steps)
